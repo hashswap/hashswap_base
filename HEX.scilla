@@ -667,7 +667,9 @@ end
 
 transition RemoveSponsorLiquidity(
   token_address : ByStr20,
-  husd_amount : Uint128
+  husd_amount : Uint128,
+  sponsor_address: ByStr20,
+  influencer_wallet: ByStr20
 )
 
   (* deadline block is not required  because amount is directly in husd and not lp tokens *)
@@ -731,8 +733,8 @@ transition RemoveSponsorLiquidity(
 
               husd_out = Coins husd husd_amount;
               tokens_out = Coins token token_amount;
-              Send husd_out _sender;
-              Send tokens_out _sender;
+              Send husd_out sponsor_address;
+              Send tokens_out influencer_wallet;
 
               e = { _eventname: "Burnt"; pool: token_address; address: _sender; amount: contribution_amount };
               event e

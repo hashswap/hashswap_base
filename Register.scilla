@@ -517,36 +517,8 @@ transition LaunchSponsorPool ( price : Uint128, liquidity : Uint128 )
     (* With price set by influencer and intial quantity to launch the pool *)
     
     launcher <- launcher_address;
-    msg_to_launch_pool = {_tag : "launchSponsorPool"; _recipient : launcher; _amount : zero; token : token; price : price; liquidity : liquidity};
-    msg = one_msg msg_to_launch_pool;
-    send msg;
-    
-    e = {_eventname : "influencer_pool_launched"; code : e_contract_found};
-    event e
-
-end
-
-(* This transition is called by registered INFLUENCER *)
-(* Influencer Launch the SPONSER POOL by setting PRICE, QUANTITY *)
-transition DecideOnHoldSponsorPool ( launchHEX: Bool )
-
-  (* influencer wallet address should be registered *)
-  (* _sender = influencer wallet address should exist in tokens map *)
-  WalletRegistered true _sender;
-  
-    (* Processing pools map to get token address for influencer wallet *)
-    token_contract <- tokens[_sender];
-    token = get_address token_contract;
-  
-    (* Pool should NOT be in verification stage wallet -> owner *)
-    err1 = UnauthorizedAddressMismatch;
-    err2 = DefaultError;
-    AddressMatch false token owner err1 err2;
-  
-    (* Send a Msg to LAUNCHER contract *)
-    launcher <- launcher_address;
-    msg_to_launch_pool = {_tag : "resolveHoldSponsorPool"; _recipient : launcher; _amount : zero; 
-    token : token; launchHEX : launchHEX};
+    msg_to_launch_pool = {_tag : "launchSponsorPool"; _recipient : launcher; _amount : zero; 
+    influencer_wallet : _sender; token : token; price : price; liquidity : liquidity};
     msg = one_msg msg_to_launch_pool;
     send msg;
     

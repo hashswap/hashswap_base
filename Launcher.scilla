@@ -130,7 +130,7 @@ type Token = | Token of ByStr20 (* token address / hash *)
 type Coins = | Coins of Token Uint128 (* denom, amount *)
 type Pool = | Pool of Uint128 Uint128 (* x, y = zil reserve, token reserve *)
 type SponsorPool = | SponsorPool of Uint128 Uint128 Uint128 State (Option BNum)
-(* x, y, p = zil reserve, token reserve, price and deadline in BNum *)
+(* x, y, p = husd reserve, token reserve, price and deadline in BNum *)
 
 let husd_address = 0xad686d12e5326448f6dffdc11803276683b17d31
 let husd = Token husd_address
@@ -172,6 +172,9 @@ let frac : Uint128 -> Uint128 -> Uint128 -> Option Uint128  =
 
 contract Launcher
 (owner: ByStr20)
+
+(* All token with influencer address *)
+field influencer : Map ByStr20  ByStr20 = Emp ByStr20 ByStr20
 
 (* All launch pools with token address -> x y price deadline *)
 field launchs : Map ByStr20 SponsorPool = Emp ByStr20 SponsorPool
@@ -466,7 +469,7 @@ end
 
 (* This Transition can only be called by Register *)
 (* Decide the exact process how this transition is called *)
-transition launchSponsorPool ( token : ByStr20, price : Uint128, liquidity : Uint128)
+transition launchSponsorPool ( influencer_wallet : ByStr20, token : ByStr20, price : Uint128, liquidity : Uint128)
   
   (* Sender should be same as oracle *)
   MatchSender register;
@@ -488,7 +491,7 @@ transition launchSponsorPool ( token : ByStr20, price : Uint128, liquidity : Uin
         let new_state = Validation in
       SponsorPool zero liquidity price new_state deadline;
       launchs[token] := launch_sponser_pool;
-      
+      influencer[token] := influencer_wallet;
       
       (* Send a Query Msg to Token to check the Max supply and Activate the pool *)
       (* Also checks the number of holders which should be only one i.e launcher *)
@@ -735,60 +738,69 @@ transition AddSponser (
 end
 
 
-(* Only Register can call this transition *)
+(* Only Influencer can call this transition *)
 (* When a Influencer target price is not met till the deadline 
 the pool goes in Onhold state. To Resolve this state 
-Influencer can launch at current price or Dissolve the pool
-Influencer can call this transition through Register *)
+Influencer can launch at current price or Dissolve the pool *)
 transition resolveHoldSponsorPool ( token : ByStr20, launchHEX: Bool )
 
-  (* Sender should be REGISTER *)
-  MatchSender register;
-
-  maybe_pool <- launchs[token];
-  match maybe_pool with
+  maybe_influencer_wallet <- influencer[token];
+  match maybe_influencer_wallet with
   | None =>
-    e = { _exception : "ERROR_Resolve_Hold:Sponsor_Pool_Absent_in_Launcher" };
+    e = { _exception : "ERROR_Resolve_Hold:Sponsor_Wallet_Does_Not_Exist" };
     throw e
-  | Some pool =>
-    match pool with
-    | SponsorPool x y p state d =>
+  | Some influencer_wallet =>
+    is_sender_influencer = builtin eq influencer_wallet _sender;
+    match is_sender_influencer with
+    | False =>
+      e = { _exception : "ERROR_Resolve_Hold:Influencer_Wallet_Token_Does_Not_Match" };
+      throw e
+    | True =>
+      maybe_pool <- launchs[token];
+      match maybe_pool with
+      | None =>
+        e = { _exception : "ERROR_Resolve_Hold:Sponsor_Pool_Absent_in_Launcher" };
+        throw e
+      | Some pool =>
+        match pool with
+        | SponsorPool x y p state d =>
+          match state with
+          | Open =>
+            e = { _exception : "ERROR_Resolve_Hold:Resolution_Not_Needed_in_Open_State" };
+            throw e
+          | Dissolve =>
+            e = { _exception : "ERROR_Resolve_Hold:Resolution_Not_Needed_in_Dissolve_State" };
+            throw e
+          | ToLaunch =>
+            e = { _exception : "ERROR_Resolve_Hold:Resolution_Not_Needed_in_ToLaunch_State" };
+            throw e
+          | Launched =>
+            e = { _exception : "ERROR_Resolve_Hold:Resolution_Not_Needed_in_Launched_State" };
+            throw e
+          | Validation =>
+            e = { _exception : "ERROR_Resolve_Hold:Resolution_Not_Needed_in_Validation_State" };
+            throw e
+          | OnHold =>
       
-      match state with
-      | Open =>
-        e = { _exception : "ERROR_Resolve_Hold:Resolution_Not_Needed_in_Open_State" };
-        throw e
-      | Dissolve =>
-        e = { _exception : "ERROR_Resolve_Hold:Resolution_Not_Needed_in_Dissolve_State" };
-        throw e
-      | ToLaunch =>
-        e = { _exception : "ERROR_Resolve_Hold:Resolution_Not_Needed_in_ToLaunch_State" };
-        throw e
-      | Launched =>
-        e = { _exception : "ERROR_Resolve_Hold:Resolution_Not_Needed_in_Launched_State" };
-        throw e
-      | Validation =>
-        e = { _exception : "ERROR_Resolve_Hold:Resolution_Not_Needed_in_Validation_State" };
-        throw e
-      | OnHold =>
-      
-        new_sposnser_pool =
-          let new_state = match launchHEX with
-          | True => ToLaunch
-          | False => Dissolve 
-          end in 
-          let option_new_deadline = None {BNum} in
-        SponsorPool x y p new_state option_new_deadline;
-        launchs[token] := new_sposnser_pool;
+            new_sposnser_pool =
+            let new_state = match launchHEX with
+            | True => ToLaunch
+            | False => Dissolve 
+            end in 
+            let option_new_deadline = None {BNum} in
+            SponsorPool x y p new_state option_new_deadline;
+            launchs[token] := new_sposnser_pool;
         
-        match launchHEX with
-        | False => 
-          e = {_eventname : "EVENT_Resolve_Hold:Sponsor_Pool_Hold_To_Dissolve"};
-          event e 
-        | True =>
-          e = {_eventname : "EVENT_Resolve_Hold:Sponsor_Pool_Hold_To_Launch"};
-          event e; 
-          LaunchPoolOnHEX token
+            match launchHEX with
+            | False => 
+              e = {_eventname : "EVENT_Resolve_Hold:Sponsor_Pool_Hold_To_Dissolve"};
+              event e 
+            | True =>
+              e = {_eventname : "EVENT_Resolve_Hold:Sponsor_Pool_Hold_To_Launch"};
+              event e; 
+              LaunchPoolOnHEX token
+            end
+          end
         end
       end
     end
@@ -1010,16 +1022,24 @@ transition RemoveSponser (
                           (* And pay the sponsor back *)
                           (* Also redeem the corresponding tokens to influencer *)
                           
-                          e = {_eventname : "EVENT_Remove_Sponsor:Withdrawal_Request_Forwarded_To_HEX_in_Launched_State" };
-                          event e;
-                          
-                          (* SEND A MSG TO A TRANSITION WITH SPONSER TOKEN REDEEM AND PAY SPONSER AND INFLUENCER *)
-                          redeem_sponsor_msg = {_tag : "RemoveSponsorLiquidity"; 
-                          _recipient : register; _amount : zero; 
-                          token : token; sposnsor : _sender; husd_amount : diffsp};
-                          msgs = oneMsg redeem_sponsor_msg;
-                          send msgs
-                          
+                          (* Get Influencer wallet address from Influencer map *)
+                          maybe_influencer_wallet <- influencer[token];
+                          match maybe_influencer_wallet with
+                          | None =>
+                            e = { _exception : "ERROR_Remove_Sponsor:Sponsor_Wallet_Does_Not_Exist" };
+                            throw e
+                          | Some influencer_wallet =>
+                            e = {_eventname : "EVENT_Remove_Sponsor:Withdrawal_Request_Forwarded_To_HEX_in_Launched_State" };
+                            event e;
+                            (* SEND A MSG TO A TRANSITION WITH SPONSER TOKEN REDEEM AND PAY SPONSER AND INFLUENCER *)
+                            redeem_sponsor_msg = {_tag : "RemoveSponsorLiquidity"; 
+                            _recipient : register; _amount : zero; 
+                            token : token; husd_amount : diffsp; 
+                            sponsor_address : _sender; influencer_wallet : influencer_wallet};
+                            msgs = oneMsg redeem_sponsor_msg;
+                            send msgs
+                            
+                          end
                         end
                       end
                     end

@@ -3,28 +3,24 @@ Things to Do / Sort Out / Finalize / Conceptual / Future Updates
 
 To Complete:
 
-1. Complete the "RemoveSponsor" by completing the process of redeeming from HEX when sponsor wants to remove sponsor amount.
+1. Complete the "RemoveSponsor" by completing the process of redeeming from HEX when sponsor wants to remove sponsor amount. COMPLETED
 
-2. Add error msg to all the condions in Launcher and other contracts.
+2. Add error msg to all the condions in Launcher and other contracts. COMPLETED
 
-
-
+3. Oracle and Burn/Mint for HUSD-HASH conversion using Zillinka
 
 
 To Do:
 
-1. Add a TEST transition in Launcher to change sate of pools for testing exceptions.
+1. Add a TEST transition in Launcher to change sate of pools for testing exceptions. DONE
 
-2. Complete Testing by simulating/raising all exceptions in Launcher.
+2. Complete Testing by simulating/raising all exceptions in Launcher. 
 
 
 
 3. Create a code to DISTRIBUTE transaction fee based on LP tokens.
 
 4. Create a WAY to "IncreaseAllowance" before calling "AddLiquidity" or "Addsponsor" by investors!!! 
-
-
-
 
 
 Finalize:
