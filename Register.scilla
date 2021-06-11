@@ -1,0 +1,559 @@
+(***************************************************)
+(*                 Scilla version                  *)
+(***************************************************)
+
+scilla_version 0
+
+(***************************************************)
+(*               Associated library                *)
+(***************************************************)
+library Register
+
+let zero = Uint128 0
+let smallzero = Uint32 0
+let smallone = Uint32 1
+let true: Bool = True
+let false: Bool = False
+
+
+(* Wrap single message into singleton list *)
+let one_msg =
+  fun (msg : Message) =>
+    let nil_msg = Nil {Message} in
+    Cons {Message} msg nil_msg
+    
+let two_msgs =
+fun (msg1 : Message) =>
+fun (msg2 : Message) =>
+  let msgs_tmp = one_msg msg2 in
+  Cons {Message} msg1 msgs_tmp
+  
+(* Hardcoded url of platforms allowed *)
+(* This should be mutable variable if they change in fututre etc *)
+let insta_url : String = "https://www.instagram.com/"
+let twitter_url : String = "https://www.twitter.com/"
+let youtube_url : String = "https://www.youtube.com/"
+let link_check_url =
+  fun (link : String) =>
+  fun (str : String) =>
+    let idx = Uint32 0 in
+    let len = builtin strlen str in
+    let sstr = builtin substr link idx len in
+    let linkBool = builtin eq str sstr in
+  linkBool
+  
+
+  
+(* Event Codes *)
+let e_link_found = Uint32 1
+let e_link_registered  = Uint32 2
+let e_contract_found = Uint32 3
+let e_contract_deployed = Uint32 4
+let e_already_deployed = Uint32 5
+
+
+(* Error events *)
+type Error =
+| DefaultError
+| UnauthorizedSender
+| UnauthorizedOwner
+| SenderOwnerMismatch
+| UnauthorizedAddressMismatch
+| UnauthorizedAddressMatch
+| FlagIsFalse
+| FlagIsTrue
+| LinkInRegister
+| LinkNotInRegister
+| WalletIsRegistered
+| WalletIsNotRegistered
+
+
+let make_error =
+fun (result : Error) =>
+  let result_code = 
+    match result with
+    | DefaultError                      => Int32 0
+    | UnauthorizedSender                => Int32 -1
+    | UnauthorizedOwner                 => Int32 -2
+    | SenderOwnerMismatch               => Int32 -3
+    | UnauthorizedAddressMismatch       => Int32 -40
+    | UnauthorizedAddressMatch          => Int32 -41
+    | FlagIsFalse                       => Int32 -50
+    | FlagIsTrue                        => Int32 -51
+    | LinkInRegister                    => Int32 -60
+    | LinkNotInRegister                 => Int32 -61
+    | WalletIsRegistered                => Int32 -70
+    | WalletIsNotRegistered             => Int32 -71
+    end
+  in
+  let result_string : String = 
+    match result with
+    | DefaultError                      => "Error Never Called"
+    | UnauthorizedSender                => "unauthorized sender"
+    | UnauthorizedOwner                 => "Unauthorized Owner"
+    | SenderOwnerMismatch               => "Sender Owner Mismatch"
+    | UnauthorizedAddressMismatch       => "Unauthorized Address Mismatch"
+    | UnauthorizedAddressMatch          => "Unauthorized Address Match"
+    | FlagIsFalse                       => "Flag Is False"
+    | FlagIsTrue                        => "Flag Is True"
+    | LinkInRegister                    => "Link is already in registered map"
+    | LinkNotInRegister                 => "Link is not in registered map"
+    | WalletIsRegistered                => "Wallet_Token is already registered"
+    | WalletIsNotRegistered             => "Wallet_Token is not registered"
+    end
+  in
+  { _exception : result_string; code : result_code }
+    
+
+
+let zeroAddress: ByStr20 = 0x0000000000000000000000000000000000000000
+
+(* Oracle Contract id is saved as a Immutable Variable *)
+(* Because Oracle is deployed first  and Orcacle address is hardcoded *)
+(* So no one can possibly change it sice it is a immutable variable *)
+let oracle: ByStr20 = 0x3396ee3eab04d3033c20474a3cb538ac7f6b4a18
+
+
+(* To avoid Option ByStr20 type while matching with ByStr20 *)
+let get_address =
+  fun (some_address: Option ByStr20) =>
+  match some_address with
+  | Some val => val
+  | None => zeroAddress
+  end
+
+(***************************************************)
+(*             The contract definition             *)
+(***************************************************)
+
+contract Register
+(owner: ByStr20)
+
+(* This map is a log of Link *)
+(* Any link can appear only once*)
+(* Verified link exist with influencer wallet address *)
+(* Unverified links exist with owner address *)
+field register: Map String ByStr20
+                = Emp String ByStr20
+
+
+(* This map is a log of Influencer wallet addresses *)
+(* Any wallet address can appear only once*)
+(* Verified wallet exist with influencer ZRC20 token address wallet -> token *)
+(* Unverified token contracts exist with wallet -> owner address *)
+field tokens: Map ByStr20 ByStr20
+                = Emp ByStr20 ByStr20
+
+field valid_link : Bool = false
+
+
+(* Fix Sponser pool address in Register *)
+field launcher_address : ByStr20 = zeroAddress
+field launcher_address_called : Bool = false
+  
+
+(**************************************)
+(*             Procedures             *)
+(**************************************)
+
+
+procedure ThrowError(err : Error)
+  e = make_error err;
+  throw e
+end
+
+procedure FlagIsTrue(flag : Bool)
+  match flag with
+  | True => 
+  | False =>
+    err = FlagIsFalse;
+    ThrowError err
+  end
+end
+
+procedure FlagIsFalse(flag : Bool)
+  match flag with
+  | True => 
+    err = FlagIsTrue;
+    ThrowError err
+  | False =>
+  end
+end
+
+procedure AddressMatch(yes : Bool, address1 : ByStr20, address2 : ByStr20, err1 : Error, err2 : Error)
+  is_match = builtin eq address1 address2;
+  match is_match with
+  | True =>
+    match yes with
+    | True =>
+    | False =>
+      ThrowError err2
+    end
+  | False =>
+    match yes with
+    | True =>
+      ThrowError err1
+    | False =>
+    end
+  end
+end
+
+
+procedure MatchSender(address : ByStr20)
+  err1 = UnauthorizedSender;
+  err2 = DefaultError;
+  AddressMatch true address _sender err1 err2
+end
+
+procedure MatchOwner(address : ByStr20)
+  err1 = UnauthorizedOwner;
+  err2 = DefaultError;
+  AddressMatch true owner address err1 err2
+end
+
+procedure OwnerIsSender()
+  err1 = SenderOwnerMismatch;
+  err2 = DefaultError;
+  AddressMatch true owner _sender err1 err2
+end
+
+procedure LinkRegistered(yes : Bool, link : String)
+  link_exist <- exists register[link];
+  match link_exist with
+  | True =>
+        match yes with
+        |True =>
+        | False =>
+          err = LinkInRegister;
+          ThrowError err
+        end
+  | False =>
+        match yes with
+        |True =>
+          err = LinkNotInRegister;
+          ThrowError err
+        | False =>
+        end
+  end
+
+end
+
+procedure WalletRegistered(yes : Bool, wallet : ByStr20)
+  wallet_exist <- exists tokens[wallet];
+  match wallet_exist with
+  | True =>
+        match yes with
+        |True =>
+        | False =>
+          err = WalletIsRegistered;
+          ThrowError err
+        end
+  | False =>
+        match yes with
+        |True =>
+          err = WalletIsNotRegistered;
+          ThrowError err
+        | False =>
+        end
+  end
+end
+
+
+
+
+(* Checking the domain etc from influencer link *)
+procedure ValidateLink (link : String)
+  is_insta_link = link_check_url link insta_url;
+  match is_insta_link with
+  | True => 
+    valid_link := true
+  | False => 
+    is_twitter_link = link_check_url link twitter_url;
+    match is_twitter_link with
+    | True => 
+      valid_link := true
+    | False =>
+      is_youtube_link = link_check_url link youtube_url;
+      match is_youtube_link with
+      | True => 
+        valid_link := true
+      | False =>
+        valid_link := false
+      end
+    end
+  end
+end
+  
+(***************************************)
+(*             Transitions             *)
+(***************************************)
+  (* This transition is called ONE time *)
+  (* Only Launcher can call this transition *)
+  (* Owner of Launcher and Register Should be SAME *)
+  (* Register Address is hardcoded in Launcher *)
+  transition setLauncherAddress( sender_owner: ByStr20 )
+  
+    (* Owner of Register contract should be same as owner *)
+    MatchOwner sender_owner;
+
+      (* If register flag is false then set register_address field to sender *)
+      address_flag <- launcher_address_called;
+      FlagIsFalse address_flag;
+      
+          launcher_address_called := true;
+          launcher_address := _sender;
+          e = {_eventname : "ponser_contract_address_set_forever"; code : e_link_found};
+          event e
+      
+  end
+  
+  
+  
+(* Called by Owner only (precaution) *)
+(* Self Locking with Oracle *)
+(* Oracle is deployed before Register *)
+(* To set the Register address in Oracle this transition is called *)
+(* This transition requires owner of REGISTER and ORACLE to be SAME *)
+transition SetRegisterOracle ()
+
+  (* Sender should be same as Owner *)
+  OwnerIsSender;
+  
+      (* owner_register is set as _sender not owner (obsessive double check) *)
+      msg = {_tag : "setRegisterAddress"; _recipient : oracle; _amount : zero; sender_owner : _sender};
+      msgs = one_msg msg;
+      send msgs
+  
+end
+
+
+(* Called by Anyone: ideally it should be a Influencer wallet *)
+(* Verify Influencer Link using Library Function and Checking with Oracle *)
+(* This transition only pass the link query over to Oracle WITHOUT the wallet *)
+(* So ANYONE can call this transition for ANY link *)
+transition RegisterLink (link : String)
+
+  (*  Checking the link through a procedure *)
+  ValidateLink link;
+  is_valid_link <- valid_link;
+  
+  (* Setting valid link state back to false: Need to CHECK if this is safe enough *)
+  valid_link := false;
+  
+  (* is valid link should be true *)
+  FlagIsTrue is_valid_link;
+  
+  (* Link shouldn't be in Register map already *)
+  LinkRegistered false link;
+  
+  (* Asking the oracle if this is an eligible link *)
+  msg = {_tag : "validateLink"; _recipient : oracle; _amount : zero; link : link};
+  msgs = one_msg msg;
+  send msgs;
+      
+  e = {_eventname : "new_link_validition"; code : e_link_registered};
+  event e
+
+end
+
+
+
+(* Called by Oracle only *)
+(* When Oracle says the Link is eligible for registration *)
+(* Oracle starts a verification process by generating a Verify string for link and wallet *)
+(* This transition creates 2 entries: one in register map and other in pool map*)
+transition startVerifiy (link : String)
+
+  (* Sender should be same as oracle *)
+  MatchSender oracle;
+  
+    (* Link shouldn't be in Register map already *)
+    LinkRegistered false link;
+  
+      (* Create a record in register map with link -> owner *)
+      register[link] := owner;
+      e = {_eventname : "new_link_registered"; code : e_link_registered};
+      event e
+  
+end
+
+(* When Oracle says the Link is NOT eligible for registration *)
+(* This transitin only emits an Event with fail verification *)
+transition failVerify () 
+  
+  (* Sender should be same as oracle *)
+  MatchSender oracle;
+  
+    e = {_eventname : "link_is_not_eligible"; code : e_link_registered};
+    event e
+  
+end
+
+
+(* Oracle calls this transition when Verification of random string is Completed by Influencer *)
+transition verifyCompleteLink (link : String, wallet : ByStr20) 
+  
+  (* Sender should be same as oracle *)
+  MatchSender oracle;
+    
+    (* Link should be in Register map already *)
+    LinkRegistered true link;
+      
+      (* Processing to extract wallet for link from register map *)
+      s_owner <- register[link];
+      saved_owner = get_address s_owner;
+      
+        (* Comparing saved verify string with owner (Link Already verified case) *)
+        err1 = UnauthorizedAddressMismatch;
+        err2 = DefaultError;
+        AddressMatch true saved_owner owner err1 err2;
+        
+        (* On completing Verification: register map is updated with link -> wallet  *)
+        (* More than one link can be registered wit same wallet *)
+        (* If someone copies the wallet (public address of anopther influencer)*)
+        (* Their link would be registered with wrong wallet *)
+        register[link] := wallet;
+        
+        (* ONLY one token can be registered with a wallet *)
+        (* If Wallet is not already present in token map *)
+        (* Else nothing *)
+        WalletRegistered false wallet;
+        
+          (* New record is created in pools wallet -> owner *)
+          tokens[wallet] := owner;
+        
+        e = {_eventname : "New_verify_complete"; code : e_link_registered};
+        event e
+            
+      
+end
+
+
+
+(* Alternate way of registering token by Influencer *)
+(* Influencer call this transition with their wallet *)
+(* Influencer can provide all info to create their token *)
+(* This info is sent to Oracle which creates the contract on behalf of Influencer*)
+(* Variables provided by Influencer are name and symbol *)
+(* Variables like contract_owner, decimals, init_supply can be set directly by Oracle *)
+transition RequestToken ( name : String, symbol : String, decimals : Uint32, supply : Uint128 )
+
+  (* influencer wallet address should be registered *)
+  (* _sender = influencer wallet address should exist in tokens map *)
+  WalletRegistered true _sender;
+    
+    (* Processing pools map to get saved verify string for wallet *)
+    token_contract <- tokens[_sender];
+    token_owner = get_address token_contract;
+  
+    (* Pool should be in verification stage wallet -> owner *)
+    err1 = UnauthorizedAddressMismatch;
+    err2 = DefaultError;
+    AddressMatch true token_owner owner err1 err2;
+    
+    (* Check if pool contract exist and _sender for this transition is the  owner *)
+    (* Asking the oracle if this is an eligible link *)
+    msg = {_tag : "createToken"; _recipient : oracle; _amount : zero; wallet : _sender; name : name; symbol : symbol; decimals : decimals; supply : supply};
+    msgs = one_msg msg;
+    send msgs;
+    
+    
+    e = {_eventname : "token_creation_initiated"; code : e_contract_found};
+    event e
+
+end
+
+
+
+
+(* This transition is called by Oracle *)
+(* If Influencer wallet is in token map with owner i.e wallet -> owner *)
+(* New token contract address is registered in the map i.e pool -> token *)
+transition activateToken ( wallet : ByStr20, token : ByStr20 )
+
+  (* Sender should be same as oracle *)
+  MatchSender oracle;
+  
+    (* influencer wallet address should be registered *)
+    (* _sender = influencer wallet address should exist in tokens map *)
+    WalletRegistered true wallet;
+    
+      (* Processing pools map to get saved verify string for wallet *)
+      s_wallet_owner <- tokens[wallet];
+      saved_wallet_owner = get_address s_wallet_owner;
+  
+      (* Pool should be in verification stage wallet -> owner *)
+      err1 = UnauthorizedAddressMismatch;
+      err2 = DefaultError;
+      AddressMatch true saved_wallet_owner owner err1 err2;
+    
+      (* Update record in tokens map with influencer_address -> token_address *)
+      tokens[wallet] := token;
+      
+      e = {_eventname : "new_token_activated"; code : e_contract_found};
+      event e
+
+end
+
+
+(* This transition is called by registered INFLUENCER *)
+(* Influencer Launch the SPONSER POOL by setting PRICE, QUANTITY *)
+transition LaunchSponsorPool ( price : Uint128, liquidity : Uint128 )
+
+  (* influencer wallet address should be registered *)
+  (* _sender = influencer wallet address should exist in tokens map *)
+  WalletRegistered true _sender;
+  
+    (* Processing pools map to get token address for influencer wallet *)
+    token_contract <- tokens[_sender];
+    token = get_address token_contract;
+  
+    (* Pool should NOT be in verification stage wallet -> owner *)
+    err1 = UnauthorizedAddressMismatch;
+    err2 = DefaultError;
+    AddressMatch false token owner err1 err2;
+  
+    (* Send a Msg to LAUNCHER contract *)
+    (* With price set by influencer and intial quantity to launch the pool *)
+    
+    launcher <- launcher_address;
+    msg_to_launch_pool = {_tag : "launchSponsorPool"; _recipient : launcher; _amount : zero; token : token; price : price; liquidity : liquidity};
+    msg = one_msg msg_to_launch_pool;
+    send msg;
+    
+    e = {_eventname : "influencer_pool_launched"; code : e_contract_found};
+    event e
+
+end
+
+(* This transition is called by registered INFLUENCER *)
+(* Influencer Launch the SPONSER POOL by setting PRICE, QUANTITY *)
+transition DecideOnHoldSponsorPool ( launchHEX: Bool )
+
+  (* influencer wallet address should be registered *)
+  (* _sender = influencer wallet address should exist in tokens map *)
+  WalletRegistered true _sender;
+  
+    (* Processing pools map to get token address for influencer wallet *)
+    token_contract <- tokens[_sender];
+    token = get_address token_contract;
+  
+    (* Pool should NOT be in verification stage wallet -> owner *)
+    err1 = UnauthorizedAddressMismatch;
+    err2 = DefaultError;
+    AddressMatch false token owner err1 err2;
+  
+    (* Send a Msg to LAUNCHER contract *)
+    launcher <- launcher_address;
+    msg_to_launch_pool = {_tag : "resolveHoldSponsorPool"; _recipient : launcher; _amount : zero; 
+    token : token; launchHEX : launchHEX};
+    msg = one_msg msg_to_launch_pool;
+    send msg;
+    
+    e = {_eventname : "influencer_pool_launched"; code : e_contract_found};
+    event e
+
+end
+
+
+

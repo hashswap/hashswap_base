@@ -1,0 +1,1106 @@
+(***************************************************)
+(*                 Scilla version                  *)
+(***************************************************)
+
+scilla_version 0
+
+(***************************************************)
+(*               Associated library                *)
+(***************************************************)
+import BoolUtils IntUtils
+
+library Register
+
+let one = Uint128 1
+let zero = Uint128 0
+let smallzero = Uint32 0
+let smallone = Uint32 1
+let true: Bool = True
+let false: Bool = False
+
+
+(* Wrap single message into singleton list *)
+let oneMsg : Message -> List Message =
+  fun (msg : Message) =>
+    let nil_msg = Nil {Message} in
+    Cons {Message} msg nil_msg
+
+let twoMsgs =
+fun (msg1 : Message) =>
+fun (msg2 : Message) =>
+  let msgs_tmp = oneMsg msg2 in
+  Cons {Message} msg1 msgs_tmp
+  
+(* Event Codes *)
+let e_link_found = Uint32 1
+let e_link_registered  = Uint32 2
+let e_contract_found = Uint32 3
+let e_contract_deployed = Uint32 4
+let e_already_deployed = Uint32 5
+
+
+(* Error events *)
+type Error =
+| DefaultError
+| UnauthorizedSender
+| SenderOwnerMismatch
+| UnauthorizedAddressMismatch
+| UnauthorizedAddressMatch
+| FlagIsFalse
+| LinkInRegister
+| LinkNotInRegister
+| WalletIsRegistered
+| WalletIsNotRegistered
+
+
+let make_error =
+fun (result : Error) =>
+  let result_code = 
+    match result with
+    | DefaultError                      => Int32 0
+    | UnauthorizedSender                => Int32 -1
+    | SenderOwnerMismatch               => Int32 -3
+    | UnauthorizedAddressMismatch       => Int32 -40
+    | UnauthorizedAddressMatch          => Int32 -41
+    | FlagIsFalse                       => Int32 -5
+    | LinkInRegister                    => Int32 -60
+    | LinkNotInRegister                 => Int32 -61
+    | WalletIsRegistered                => Int32 -70
+    | WalletIsNotRegistered             => Int32 -71
+    end
+  in
+  let result_string : String = 
+    match result with
+    | DefaultError                      => "Error Never Called"
+    | UnauthorizedSender                => "unauthorized sender"
+    | SenderOwnerMismatch               => "Sender Owner Mismatch"
+    | UnauthorizedAddressMismatch       => "Unauthorized Address Mismatch"
+    | UnauthorizedAddressMatch          => "Unauthorized Address Match"
+    | FlagIsFalse                       => "Flag Is False"
+    | LinkInRegister                    => "Link is already in registered map"
+    | LinkNotInRegister                 => "Link is not in registered map"
+    | WalletIsRegistered                => "Wallet_Token is already registered"
+    | WalletIsNotRegistered             => "Wallet_Token is not registered"
+    end
+  in
+  { _exception : result_string; code : result_code }
+    
+
+
+let zeroAddress: ByStr20 = 0x0000000000000000000000000000000000000000
+
+(* Oracle Contract id is saved as a Immutable Variable *)
+(* Because Oracle is deployed first  and Orcacle address is hardcoded *)
+(* So no one can possibly change it sice it is a immutable variable *)
+let register: ByStr20 = 0xc09e3c596804fd591a440acc83d165fb01235d42
+let hex: ByStr20 = 0x01eae8b68aa35a9fe660aadbacbc2d5e392da018
+
+
+(* To avoid Option ByStr20 type while matching with ByStr20 *)
+let get_address =
+  fun (some_address: Option ByStr20) =>
+  match some_address with
+  | Some val => val
+  | None => zeroAddress
+  end
+
+(***************************************************)
+(*                         TYPES                   *)
+(***************************************************)
+
+type State = 
+  | Validation (* First State after creation -> Launcher checks token supply and sends to Open state  *)
+  | Open (* Sponsore can add HUSD in open -> ToLaunch, OnHold *)
+  | ToLaunch (* In this state pool can be launched on HEX, Send money to HEX *)
+  | Launched (* Pool already launched on HEX, only bookkeeping is done on Launcher *)
+  | OnHold (* Price Target not met, Influencer to decide whether to Launch or Dissolve *)
+  | Dissolve (* Sponsors can remove liquidity freely *)
+  
+
+type Liquidate = 
+  | Full
+  | Partial of Uint128
+  
+type SponsorToken = | SponsorToken of Uint128 Uint128 (Option BNum)
+(* sp rp lock: sp is the sponsor husd in the pool *)
+(* sp rp lock: rp is the removal reuest for sponsor husd from the pool *)
+(* sp rp lock: loack is the sponsor lockin period to remove husd from the pool *)
+
+type Token = | Token of ByStr20 (* token address / hash *)
+type Coins = | Coins of Token Uint128 (* denom, amount *)
+type Pool = | Pool of Uint128 Uint128 (* x, y = zil reserve, token reserve *)
+type SponsorPool = | SponsorPool of Uint128 Uint128 Uint128 State (Option BNum)
+(* x, y, p = zil reserve, token reserve, price and deadline in BNum *)
+
+let husd_address = 0xad686d12e5326448f6dffdc11803276683b17d31
+let husd = Token husd_address
+
+
+let open_Deadline = Uint128 15000  (* 20 - 30 days *)
+let onHold_Deadline = Uint128 3000 (* 5 days On hold deadline should be smaller, Influencer should decide quickly *)
+let dissolve_Deadline = Uint128 0 (* 0 days. Once the pool dissolves, sponsors can take out money immidiately *)
+let sponsor_Lockin = Uint128 10000 (* 30 days *)
+
+
+let min_liquidity = Uint128 1000 (* 1000 HUSD: This is Different for Zil 1000 Zil = Uint128 1000000000000000 *)
+
+let grow : Uint128 -> Uint256 =
+  fun (var : Uint128) =>
+    let maybe_big = builtin to_uint256 var in
+    match maybe_big with
+    | Some big => big
+    | None => Uint256 0 (* should never happen *)
+    end
+
+
+(* computes the amount of the fraction x / d that is in y *)
+let frac : Uint128 -> Uint128 -> Uint128 -> Option Uint128  =
+  fun (d : Uint128) =>
+  fun (x : Uint128) =>
+  fun (y : Uint128) =>
+    let big_x = grow x in
+    let big_y = grow y in
+    let big_d = grow d in
+    let d_times_y = builtin mul big_d big_y in
+    let d_times_y_over_x = builtin div d_times_y big_x in
+    builtin to_uint128 d_times_y_over_x
+    
+
+(***************************************************)
+(*             The contract definition             *)
+(***************************************************)
+
+contract Launcher
+(owner: ByStr20)
+
+(* All launch pools with token address -> x y price deadline *)
+field launchs : Map ByStr20 SponsorPool = Emp ByStr20 SponsorPool
+
+(* All token address -> total Influencers tokens minted so sponsers can 'sponser' more tokens later 
+to add more liquidity to pools *)
+(* Example: Total tokens -> 1 Million, Initial launch -> 10000 tokens;
+So reserves map has 1million - 10000 saved. Later sponser can add more liquidity to the pool 
+by 'sponsoring' more token (while keeping the price same) *)
+field reserves: Map ByStr20 Uint128 = Emp ByStr20 Uint128
+
+(* This firld map keeps a log of all the maximum supply of influencer tokens *)
+(* This field is updated by regster when token minting is complete *)
+field max_supplies: Map ByStr20 Uint128 = Emp ByStr20 Uint128
+
+(* Map of each sponser LP tokens *)
+field sponsors : Map ByStr20 (Map ByStr20 SponsorToken) = Emp ByStr20 (Map ByStr20 SponsorToken)
+
+(* Map of total sponser LP tokens for each token pool *)
+field total_sponsorship : Map ByStr20 Uint128 = Emp ByStr20 Uint128
+
+
+(**************************************)
+(*             Procedures             *)
+(**************************************)
+
+
+procedure ThrowError(err : Error)
+  e = make_error err;
+  throw e
+end
+
+procedure FlagIsTrue(flag : Bool)
+  match flag with
+  | True => 
+  | False =>
+    err = FlagIsFalse;
+    ThrowError err
+  end
+end
+
+procedure AddressMatch(yes : Bool, address1 : ByStr20, address2 : ByStr20, err1 : Error, err2 : Error)
+  is_match = builtin eq address1 address2;
+  match is_match with
+  | True =>
+    match yes with
+    | True =>
+    | False =>
+      ThrowError err2
+    end
+  | False =>
+    match yes with
+    | True =>
+      ThrowError err1
+    | False =>
+    end
+  end
+end
+
+
+procedure MatchSender(address : ByStr20)
+  err1 = UnauthorizedSender;
+  err2 = DefaultError;
+  AddressMatch true address _sender err1 err2
+end
+
+procedure OwnerIsSender()
+  err1 = SenderOwnerMismatch;
+  err2 = DefaultError;
+  AddressMatch true owner _sender err1 err2
+end
+
+
+(***************************************)
+(*             Procedures              *)
+(***************************************)
+
+procedure ThrowIfExpired(deadline_block: BNum)
+  current_block <- & BLOCKNUMBER;
+  is_not_expired = builtin blt current_block deadline_block;
+  match is_not_expired with
+  | True =>
+  | False =>
+    e = { _exception : "TransactionExpired" };
+    throw e
+  end
+end
+
+procedure ThrowIfNotExpired(deadline_block: BNum)
+  current_block <- & BLOCKNUMBER;
+  is_not_expired = builtin blt current_block deadline_block;
+  match is_not_expired with
+  | True =>
+    e = { _exception : "TransactionNotExpired" };
+    throw e
+  | False =>
+  end
+end
+
+
+procedure ThrowIfZero(number: Uint128)
+  gt_zero = uint128_gt number zero;
+  match gt_zero with
+  | True =>
+  | False =>
+    e = { _exception : "InvalidParameter" };
+    throw e
+  end
+end
+
+
+procedure Send(coins : Coins, to_address : ByStr20)
+  match coins with
+  | Coins token amount =>
+    match token with
+    | Token t =>
+      msg_to_token =  {
+        _tag : "Transfer"; _recipient: t; _amount: zero;
+        to: to_address; amount: amount
+      };
+      msgs = oneMsg msg_to_token;
+      send msgs
+    end
+  end
+end
+
+procedure SendAllowance(coins : Coins, to_address : ByStr20)
+  match coins with
+  | Coins token amount =>
+    match token with
+    | Token t =>
+      msg_to_token =  {
+        _tag : "IncreaseAllowance"; _recipient: t; _amount: zero;
+        to: to_address; amount: amount
+      };
+      msgs = oneMsg msg_to_token;
+      send msgs
+    end
+  end
+end
+
+procedure Receive(coins : Coins)
+  match coins with
+  | Coins token amount =>
+    match token with
+    | Token t =>
+    msg_to_token = {
+        _tag : "TransferFrom"; _recipient: t; _amount: zero;
+        from: _sender; to: _this_address; amount: amount
+      };
+      msgs = oneMsg msg_to_token;
+      send msgs
+    end
+  end
+end
+
+procedure LaunchPoolOnHEX ( token : ByStr20 )
+  
+  (* Check if the launch pool exists *)
+  maybe_pool <- launchs[token];
+  match maybe_pool with
+  | None =>
+    e = { _exception : "launchPoolAbsent" };
+    throw e
+  | Some pool =>
+    match pool with
+    | SponsorPool x y p state deadline =>
+      match state with 
+      | Open =>
+      | OnHold =>
+      | Dissolve =>
+      | Launched =>
+      | Validation =>
+      | ToLaunch =>
+        
+        (* Send Money to HEX *)
+        (* Create allowence for HEX *)
+        (* Pissible reason for send allowance instead of directly sending money 
+        If Msg fails then money is not taken by HEX otherwise its difficult to track money *)
+        husd_to_HEX = Coins husd x;
+        SendAllowance husd_to_HEX hex;
+        
+        (* Sendallowance of token to HEX *)
+        tokenT = Token token;
+        token_to_HEX = Coins tokenT y;
+        SendAllowance token_to_HEX hex;
+        
+        
+        msg = {_tag : "LaunchSponsorPool"; _recipient : hex; _amount : zero; 
+              token_address: token; husd_amount : x; token_amount : y};
+        msgs = oneMsg msg;
+        send msgs
+     
+        
+      end
+    end
+  end   
+end
+
+
+(***************************************)
+(*             Transitions             *)
+(***************************************)
+
+transition TESTSetDeadline ( token : ByStr20, set_deadline: BNum)
+
+  maybe_pool <- launchs[token];
+  match maybe_pool with
+  | None =>
+  | Some pool =>
+    match pool with
+    | SponsorPool x y p s d =>
+      
+      (* Update Sponsor Pool to state OPEN *)
+      current_block <- & BLOCKNUMBER;
+      launch_sponser_pool =
+        let new_deadline = set_deadline in
+        let option_new_deadline = Some {BNum} new_deadline in
+      SponsorPool x y p s option_new_deadline;
+      launchs[token] := launch_sponser_pool
+    end
+  end
+end
+
+transition TESTSetState ( token : ByStr20, set_state: State)
+
+  maybe_pool <- launchs[token];
+  match maybe_pool with
+  | None =>
+  | Some pool =>
+    match pool with
+    | SponsorPool x y p s d =>
+      
+      match set_state with
+      | Launched =>
+      | Validation =>
+      | Open =>
+      | OnHold =>
+          
+        (* Update Sponsor Pool to state OPEN *)
+        current_block <- & BLOCKNUMBER;
+        launch_sponser_pool =
+          let new_state = OnHold in
+          let new_deadline = builtin badd current_block onHold_Deadline in
+          let option_new_deadline = Some {BNum} new_deadline in
+        SponsorPool x y p new_state option_new_deadline;
+        launchs[token] := launch_sponser_pool
+          
+        
+      | Dissolve =>
+        
+        launch_sponser_pool =
+          let new_state = Dissolve in
+          let option_new_deadline = None {BNum} in
+        SponsorPool x y p new_state option_new_deadline;
+        launchs[token] := launch_sponser_pool
+        
+      | ToLaunch =>
+        
+        launch_sponser_pool =
+          let new_state = ToLaunch in
+          let option_new_deadline = None {BNum} in
+        SponsorPool x y p new_state option_new_deadline;
+        launchs[token] := launch_sponser_pool;
+        
+        LaunchPoolOnHEX token
+        
+      end
+    end
+  end
+end 
+
+(* Called by Owner only (precaution) *)
+(* Self Locking with Register *)
+(* Register is deployed before Launcher *)
+(* To set the launcher address in Register this transition is called *)
+(* This transition requires owner of REGISTER and LAUNCHER to be SAME *)
+transition SetLauncherAddressState ()
+
+  (* Sender should be same as Owner *)
+  OwnerIsSender;
+  
+      (* owner_register is set as _sender not owner (obsessive double check) *)
+      register_msg = {_tag : "setLauncherAddress"; _recipient : register; _amount : zero; sender_owner : _sender};
+      hex_msg = {_tag : "setLauncherAddress"; _recipient : hex; _amount : zero; sender_owner : _sender};
+      msgs = twoMsgs register_msg hex_msg;
+      
+      send msgs
+  
+end
+
+
+(* This Transition can only be called by Register *)
+(* Decide the exact process how this transition is called *)
+transition launchSponsorPool ( token : ByStr20, price : Uint128, liquidity : Uint128)
+  
+  (* Sender should be same as oracle *)
+  MatchSender register;
+
+  maybe_launch <- launchs[token];
+  match maybe_launch with
+  | None =>
+    husd_liquidity = builtin mul price liquidity;
+    min_launch_liquidity = uint128_ge husd_liquidity min_liquidity;
+    match min_launch_liquidity with
+    | False =>
+      e = { _exception : "BelowParLiquidity" };
+      throw e
+    | True =>
+      
+      (* Create a NEW pool and set state VALIDAION *)
+      deadline = None {BNum};
+      launch_sponser_pool =
+        let new_state = Validation in
+      SponsorPool zero liquidity price new_state deadline;
+      launchs[token] := launch_sponser_pool;
+      
+      
+      (* Send a Query Msg to Token to check the Max supply and Activate the pool *)
+      (* Also checks the number of holders which should be only one i.e launcher *)
+      msg_to_validate_token = {_tag : "launcherValidation"; _recipient : token; _amount : zero};
+      msg = oneMsg msg_to_validate_token;
+      send msg;
+      
+      
+      e1 = { _eventname: "SponserPoolCreated"; pool: token };
+      event e1
+
+      (* NO sponser LP tokens are minted at this stage *)
+      (* Influencer should not be given any LP tokens so they cant redeem them at all *)
+      (* When HUSD is given by sponsors sponser LP tokens will be added *)
+      
+    end
+  | Some launch =>
+      e = { _exception : "alreadylaunchedSponserPool" };
+      throw e 
+  end
+  
+end
+
+
+(* This transition is called by a influencer token 
+after the token initial supply is validated by launcher 
+token calls this transition to activate the pool 
+i.e change the state of pool to open and set the open pool deadline *)
+transition activateLaunchPool ( max_supply : Uint128 )
+
+  token = _sender;
+  maybe_pool <- launchs[token];
+  match maybe_pool with 
+  | None =>
+  | Some pool => 
+    match pool with
+    | SponsorPool x liquidity p state deadline =>
+      
+      match state with
+      | Open =>
+      | OnHold =>
+      | Dissolve =>
+      | ToLaunch =>
+      | Launched =>
+      | Validation =>
+        
+        liquidity_within_limit = uint128_ge max_supply liquidity;
+        match liquidity_within_limit with
+        | False =>
+        | True =>
+          
+          (* Update Sponsor Pool to state OPEN *)
+          current_block <- & BLOCKNUMBER;
+          launch_sponser_pool =
+            let new_state = Open in
+            let new_deadline = builtin badd current_block open_Deadline in
+            let option_new_deadline = Some {BNum} new_deadline in
+          SponsorPool x liquidity p new_state option_new_deadline;
+          launchs[token] := launch_sponser_pool;
+          
+          (* Create Records in Max Supply and Reserves Map *)
+          max_supplies[token] := max_supply;
+          reserve = builtin sub max_supply liquidity;
+          reserves[token] := reserve 
+      
+        end
+      end
+    end
+  end
+end
+
+
+transition AddSponser (
+  token : ByStr20,
+  husd_amount : Uint128,
+  deadline_block : BNum
+)
+  
+  ThrowIfExpired deadline_block;
+  ThrowIfZero husd_amount;
+
+  (* Check if the launch pool exists *)
+  maybe_pool <- launchs[token];
+  match maybe_pool with
+  | None =>
+    e = { _exception : "ERROR_Add_Sponsor:Sponsor_Pool_Absent_in_Launcher" };
+    throw e
+  | Some pool =>
+    match pool with
+    | SponsorPool x y p state deadline =>
+      
+      match state with
+      | Validation =>
+        e = { _exception : "ERROR_Add_Sponsor:Sponsor_Pool_Validation_Pending" };
+        throw e
+      | ToLaunch =>
+        e = { _exception : "ERROR_Add_Sponsor:Sponsor_Pool_To_Launch_Shortly" };
+        throw e
+      | Launched =>
+        e = { _exception : "ERROR_Add_Sponsor:Sponsor_Pool_Already_Launched" };
+        throw e
+      | Dissolve =>
+        e = { _exception : "ERROR_Add_Sponsor:Sponsor_Pool_Dissolved" };
+        throw e
+      | OnHold =>
+        
+        (* Pool goes on hold after the open deadline is breached 
+        Basically when pool doesn't have enough sponsor to launch as such 
+        So it depends on the Influencer if they want to launch pool for trading with less price 
+        If Influencer don't resolve this situation it will dissolve after the onhold deadline *)
+        (* Check if the pool is on hold for long enough *)
+        current_block <- & BLOCKNUMBER;
+        
+        match deadline with
+        | None =>
+          e = { _exception : "ERROR_Add_Sponsor:ATTENTION_OnHold_Sponsor_Pool_Without_Deadline" };
+          throw e
+        | Some d =>
+          
+          is_deadline_expired = builtin blt d current_block;
+          match is_deadline_expired with
+          | False =>
+            e = { _exception : "ERROR_Add_Sponsor:Sponsor_Pool_Still_On_Hold" };
+            throw e
+          | True =>
+            
+            (* change sponser pool state, deadline; x, y, p remain the same *)
+            (* When pool goes into dissolve state sponsors can take out money from pool *)
+            (* Seperate transition needs to be wriiten for that *)
+            new_sponsor_pool =
+              let new_state = Dissolve in
+              let option_new_deadline = None {BNum} in
+            SponsorPool x y p new_state option_new_deadline;
+            launchs[token] := new_sponsor_pool;
+            
+            e = {_eventname : "EVENT_Add_Sponsor:Sponsor_Pool_Hold_To_Dissolve"};
+            event e
+            
+          end
+        end
+      
+      (* Everything runs smoothly if pool is open *)  
+      | Open =>
+        
+        (* accept all husd *)
+        (* Accept the fixed side of the swap at the start *)
+        (* For example accept HUSD side at the start *)
+        husd_in = Coins husd husd_amount;
+        Receive husd_in;
+      
+        (* update the x in sponsor pool *)
+        new_x = builtin add husd_amount x;  
+          
+        (* Updating total sponsership for token pools *)
+        maybe_total_sponsorship <- total_sponsorship[token];
+        new_sponsership = match maybe_total_sponsorship with
+        | None => husd_amount
+        | Some total_sponsership => builtin add total_sponsership husd_amount
+        end;
+        total_sponsorship[token] := new_sponsership;
+      
+          
+        (* Mint Sponser LP token at this stage *)
+        (* Sponser tokens are same as husd Amounts *)
+        maybe_sponser <- sponsors[token][_sender];
+        match maybe_sponser with
+        | Some sponser => 
+          match sponser with
+          | SponsorToken sp rp lock => 
+            new_sp = builtin add sp husd_amount;
+            new_sponser = SponsorToken new_sp rp lock;
+            sponsors[token][_sender] := new_sponser
+          end
+        | None => 
+          new_sp = husd_amount;
+          new_rp = zero;
+          new_lock = None {BNum};
+          new_sponser = SponsorToken new_sp new_rp new_lock;
+          sponsors[token][_sender] := new_sponser
+        end;
+          
+        (* Get the current block *)
+        current_block <- & BLOCKNUMBER;
+        
+        (* Check the sponsorship status now *)
+        sponsor_target = builtin mul p y; 
+        target_not_met = uint128_lt new_x sponsor_target;
+        match target_not_met with
+        | False =>
+            
+          (* change sponser pool state, deadline; x, y, p remain the same *)
+          new_sponsor_pool =
+            let new_state = ToLaunch in
+            let new_deadline = None {BNum} in
+          SponsorPool new_x y p new_state new_deadline;
+          launchs[token] := new_sponsor_pool;
+       
+          e = {_eventname : "EVENT_Add_Sponsor:Sponsor_Pool_Open_To_Launch"};
+          event e;
+          
+          (* Automatically Launch Pool on HEX *)
+          (* Might be a security issue*)
+          LaunchPoolOnHEX token
+            
+        | True =>
+        
+          (* Check if the pool is open for long enough 
+          if pool open deadline is finished it goes into onHold state *)
+          match deadline with
+          | None =>
+            e = { _exception : "ERROR_Add_Sponsor:ATTENTION_Open_Sponsor_Pool_Without_Deadline" };
+            throw e
+          | Some d =>
+            is_deadline_expired = builtin blt d current_block;
+            match is_deadline_expired with
+            | True =>
+            
+              (* change sponser pool state, deadline; x, y, p remain the same *)
+              new_sposnser_pool =
+                let new_state = OnHold in
+                let new_deadline = builtin badd current_block onHold_Deadline in
+                let option_new_deadline = Some {BNum} new_deadline in
+              SponsorPool new_x y p new_state option_new_deadline;
+              launchs[token] := new_sposnser_pool;
+      
+              e = {_eventname : "EVENT_Add_Sponsor:Sponsor_Pool_Open_To_OnHold"};
+              event e
+        
+            | False =>
+            
+              (* change sponser pool x and y ; p and d remain same *)
+              new_sposnser_pool = SponsorPool new_x y p state deadline;
+              launchs[token] := new_sposnser_pool;
+              
+              e = {_eventname : "EVENT_Add_Sponsor:Sponsor_Pool_Added_New_Sponsor"};
+              event e
+      
+            end
+          end
+        end
+      end
+    end
+  end
+end
+
+
+(* Only Register can call this transition *)
+(* When a Influencer target price is not met till the deadline 
+the pool goes in Onhold state. To Resolve this state 
+Influencer can launch at current price or Dissolve the pool
+Influencer can call this transition through Register *)
+transition resolveHoldSponsorPool ( token : ByStr20, launchHEX: Bool )
+
+  (* Sender should be REGISTER *)
+  MatchSender register;
+
+  maybe_pool <- launchs[token];
+  match maybe_pool with
+  | None =>
+    e = { _exception : "ERROR_Resolve_Hold:Sponsor_Pool_Absent_in_Launcher" };
+    throw e
+  | Some pool =>
+    match pool with
+    | SponsorPool x y p state d =>
+      
+      match state with
+      | Open =>
+        e = { _exception : "ERROR_Resolve_Hold:Resolution_Not_Needed_in_Open_State" };
+        throw e
+      | Dissolve =>
+        e = { _exception : "ERROR_Resolve_Hold:Resolution_Not_Needed_in_Dissolve_State" };
+        throw e
+      | ToLaunch =>
+        e = { _exception : "ERROR_Resolve_Hold:Resolution_Not_Needed_in_ToLaunch_State" };
+        throw e
+      | Launched =>
+        e = { _exception : "ERROR_Resolve_Hold:Resolution_Not_Needed_in_Launched_State" };
+        throw e
+      | Validation =>
+        e = { _exception : "ERROR_Resolve_Hold:Resolution_Not_Needed_in_Validation_State" };
+        throw e
+      | OnHold =>
+      
+        new_sposnser_pool =
+          let new_state = match launchHEX with
+          | True => ToLaunch
+          | False => Dissolve 
+          end in 
+          let option_new_deadline = None {BNum} in
+        SponsorPool x y p new_state option_new_deadline;
+        launchs[token] := new_sposnser_pool;
+        
+        match launchHEX with
+        | False => 
+          e = {_eventname : "EVENT_Resolve_Hold:Sponsor_Pool_Hold_To_Dissolve"};
+          event e 
+        | True =>
+          e = {_eventname : "EVENT_Resolve_Hold:Sponsor_Pool_Hold_To_Launch"};
+          event e; 
+          LaunchPoolOnHEX token
+        end
+      end
+    end
+  end
+end
+
+
+transition RemoveSponser (
+  token : ByStr20,
+  sponser_tokens : Uint128,
+  deadline_block : BNum
+)
+  
+  ThrowIfExpired deadline_block;
+  
+  maybe_total_sponsorship <- total_sponsorship[token];
+  match maybe_total_sponsorship with
+  | None =>
+    e = { _exception : "ERROR_Remove_Sponsor:Total_Sponsorship_Does_Not_Exist_For_Pool" };
+    throw e
+  | Some ts =>
+                
+    maybe_sponsor <- sponsors[token][_sender];
+    match maybe_sponsor with
+    | None => 
+      e = { _exception : "ERROR_Remove_Sponsor:This_Sponsor_Does_Not_Exist_For_Pool" };
+      throw e
+    | Some sponsor =>
+      match sponsor with
+      | SponsorToken sp rp option_lock =>
+  
+        (* Check if the launch pool exists *)
+        maybe_pool <- launchs[token];
+        match maybe_pool with
+        | None =>
+          e = { _exception : "ERROR_Remove_Sponsor:Pool_Does_Not_Exist" };
+          throw e
+        | Some pool =>
+          match pool with
+          | SponsorPool x y p state deadline =>
+      
+            match state with
+            | OnHold =>
+              e = { _exception : "ERROR_Remove_Sponsor:Sponsors_Can_Not_Withdraw_in_Hold_State" };
+              throw e(* Sponsors can't remove while pool on hold *)
+            | Open => (* Sponsors can't remove while pool on hold *)
+              e = { _exception : "ERROR_Remove_Sponsor:Sponsors_Can_Not_Withdraw_in_Open_State" };
+              throw e(* Sponsors can't remove while pool on hold *)
+            | ToLaunch => (* Sponsors can't remove when the pool is about to launch *)
+              e = { _exception : "ERROR_Remove_Sponsor:Sponsors_Can_Not_Withdraw_in_ToLaunch_State" };
+              throw e(* Sponsors can't remove while pool on hold *)
+            | Validation => (* No Sponsors are there while pool on hold *)
+              e = { _exception : "ERROR_Remove_Sponsor:Sponsors_Can_Not_Withdraw_in_Validation_State" };
+              throw e(* Sponsors can't remove while pool on hold *)
+            | Dissolve => (* Sponsor can remove tokens immediately *)
+              (* check if requested removal amount is there or not *)
+              (* In dissolves state there is no deadline *)
+              (* Both sp and rp can be redeemed immediately *)
+              total_sp = builtin add sp rp;
+              exceeds_the_limit = uint128_ge sponser_tokens total_sp;
+              match exceeds_the_limit with 
+              | True =>
+                e = { _exception : "ERROR_Remove_Sponsor:Withdrawal_Amount_Exceed_Sponsor_Token_Dissolve_State" };
+                throw e
+              | False =>
+                (* Sponser token update *)
+                new_sp = builtin sub sp sponser_tokens;
+                new_sponsor = SponsorToken new_sp rp option_lock;
+                sponsors[token][_sender] := new_sponsor;
+                
+                (* Reduce the amount in total_sponsorship *)
+                new_total_sponsorship = builtin sub ts sponser_tokens;
+                total_sponsorship[token] := new_total_sponsorship;
+                
+                (* Update the sponsor pool *)
+                new_sposnser_pool =
+                  let new_x = builtin sub x sponser_tokens in
+                SponsorPool new_x y p state deadline;
+                launchs[token] := new_sposnser_pool;
+                
+                (* Pay the sponser back *)
+                husd_out = Coins husd sponser_tokens;
+                Send husd_out _sender;
+                
+                e = {_eventname : "EVENT_Remove_Sponsor:Successful_Withdrawal_From_Dissolved_Pool"};
+                event e
+              end
+            | Launched =>
+              (* Get the current block *)
+              current_block <- & BLOCKNUMBER;
+              match option_lock with
+              | None => (* If lockin period is NOT there, set the lockin period *)
+                (* check if requested removal amount is there or not *)
+                (* comparision against only sp, rp is zero if lock is None*)
+                exceeds_the_limit = uint128_ge sponser_tokens sp;
+                match exceeds_the_limit with 
+                | True =>
+                  e = { _exception : "ERROR_Remove_Sponsor:Withdrawal_Amount_Exceed_Sponsor_Token_Launched_State" };
+                  throw e
+                | False =>
+                  (* Update the lock and rp and sp of sponsor *)
+                  (* By design sponsor can remove only one amount at one time
+                  to remove another amount only after lockin period is over for first amount 
+                  and first amount is removed *)
+                  new_sp = builtin sub sp sponser_tokens;
+                  new_rp = builtin add rp sponser_tokens; (* Ideally rp should be zero here before adding *)
+                  new_lock = builtin badd current_block sponsor_Lockin;
+                  option_new_lock = Some {BNum} new_lock;
+                  new_sponsor = SponsorToken new_sp new_rp option_new_lock;
+                  sponsors[token][_sender] := new_sponsor;
+                  
+                  (* Update zeroaddress sp *)
+                  (* Zero address acts as a balancer to keep the amount of 
+                  sponsor tokens constant in a launched pool *)
+                  maybe_zero_sponsor <- sponsors[token][zeroAddress];
+                  match maybe_zero_sponsor with
+                  | None => 
+                    zsp = sponser_tokens;
+                    zrp = zero;
+                    zlock = None {BNum};
+                    zsponsor = SponsorToken zsp zrp zlock;
+                    sponsors[token][zeroAddress] := zsponsor
+                  | Some zero_sponsor =>
+                    match zero_sponsor with
+                    | SponsorToken zsp zrp zlock =>
+                      new_zsp = builtin add sponser_tokens zsp;
+                      new_zero_sponsor = SponsorToken new_zsp zrp zlock;
+                      sponsors[token][zeroAddress] := new_zero_sponsor
+                    end
+                  end;
+                  
+                  e = {_eventname : "EVENT_Remove_Sponsor:Withdrawal_Lockin_Period_Started_Launched_State" };
+                  event e
+                  
+                end
+              | Some lock => (* If lockin period is there, check if lockin is finished or not *)
+              
+                is_lockin_over = builtin blt lock current_block;
+                match is_lockin_over with
+                | False => 
+                  e = { _exception : "ERROR_Remove_Sponsor:Withdrawal_in_Lockin_Period_Launched_State" };
+                  throw e
+                | True =>
+                  (* Check if requested withdrawal is within limits *)
+                  (* In this case it is comapred against rp not sp *)
+                  (* because only rp can be removed if lockin is over *)
+                  (* This comparison is unnecessary because rp can be redeemed 
+                  irrespective of what amount is asked for withdrawal *)
+                  exceeds_the_limit = uint128_ge sponser_tokens rp;
+                  match exceeds_the_limit with 
+                  | True =>
+                    e = { _exception : "ERROR_Remove_Sponsor:Withdrawal_Amount_Exceed_Sponsor_Token_Launched_State" };
+                    throw e
+                  | False =>
+                    
+                    (* All of rp is removed irrespective of what sponsor asked *)
+                    (* For simplification *)
+                    option_new_lock = None {BNum};
+                    new_sponsor = SponsorToken sp zero option_new_lock;
+                    sponsors[token][_sender] := new_sponsor;
+                         
+                    (* Now we have to pay the sposnsor back *) 
+                    (* This is the most tricky part *)
+                    (* If the sposnsor has been replaced already then its easy to pay him back *)
+                    (* Otherwise we have to ask DEX pool to remove liquidity and pay him back *)
+                    (* check against rp of zeroaddress if its below that then immediately remove it *)
+                    (* else the request goes to DEX *)
+                    maybe_zero_sponsor <- sponsors[token][zeroAddress];
+                    match maybe_zero_sponsor with
+                    | None => 
+                      e = { _exception : "ImpossibleErrorZeroSponserNotExistforRemoval" };
+                      throw e
+                    | Some zero_sponsor =>
+                      match zero_sponsor with
+                      | SponsorToken zsp zrp zlock =>
+                        
+                        is_unsafe_removal = uint128_ge rp zrp;
+                        match is_unsafe_removal with
+                        | False =>
+                          
+                          new_zrp = builtin sub zrp rp;
+                          new_zsponsor = SponsorToken zsp new_zrp zlock;
+                          sponsors[token][zeroAddress] := new_zsponsor;
+                          
+                          (* Pay the sponser back rp tokens *)
+                          husd_out = Coins husd rp;
+                          Send husd_out _sender;
+                          
+                          e = {_eventname : "EVENT_Remove_Sponsor:Successful_Withdrawal_From_Launcher_in_Launched_State" };
+                          event e
+                          
+                        | True =>
+                          
+                          diffsp = builtin sub rp zrp;
+                          new_zsp = builtin sub zsp diffsp;  
+                          new_zrp = zero;
+                          new_zsponsor = SponsorToken new_zsp new_zrp zlock;
+                          sponsors[token][zeroAddress] := new_zsponsor;
+                          
+                          new_ts = builtin sub ts diffsp;
+                          total_sponsorship[token] := new_ts;
+                          
+                          (* Pay from Launcher whatever can be paid. i.e  zrp *)
+                          is_zrp_zero = builtin eq zrp zero;
+                          match is_zrp_zero with
+                          | True => 
+                            e = {_eventname : "EVENT_Remove_Sponsor:Zero_Replace_Sponsor_Funds_Available_in_Launcher" };
+                            event e
+                          | False =>
+                            (* Pay the sponser back *)
+                            husd_out = Coins husd zrp;
+                            Send husd_out _sender;
+                            e = {_eventname : "EVENT_Remove_Sponsor:Partial_Redemption_From_Launcher_in_Launched_State" };
+                            event e
+                          end;
+                          
+                          (* handle the most tricky part here *)
+                          (* Basically ask DEX to redeem some sposnsor token of launcher pool *)
+                          (* And pay the sponsor back *)
+                          (* Also redeem the corresponding tokens to influencer *)
+                          
+                          e = {_eventname : "EVENT_Remove_Sponsor:Withdrawal_Request_Forwarded_To_HEX_in_Launched_State" };
+                          event e;
+                          
+                          (* SEND A MSG TO A TRANSITION WITH SPONSER TOKEN REDEEM AND PAY SPONSER AND INFLUENCER *)
+                          redeem_sponsor_msg = {_tag : "RemoveSponsorLiquidity"; 
+                          _recipient : register; _amount : zero; 
+                          token : token; sposnsor : _sender; husd_amount : diffsp};
+                          msgs = oneMsg redeem_sponsor_msg;
+                          send msgs
+                          
+                        end
+                      end
+                    end
+                  end
+                end 
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+end
+
+
+
+
+transition ReplaceSponsor (
+  token : ByStr20,
+  husd_amount : Uint128,
+  deadline_block : BNum
+)
+
+  ThrowIfExpired deadline_block;
+  
+  (* no need to check pool exist for token *)
+  (* maybe replace amount will suffice *)
+  maybe_replace_amount <- sponsors[token][zeroAddress];
+  match maybe_replace_amount with
+  | None => 
+    e = { _exception : "ERROR_Replace_Sponsor:No_Token_Pool_Or_No_Sponsor_Token_To_replace" };
+    throw e(* Sponsors can't remove while pool on hold *)
+              
+    (* No sposnsor to replace *)
+  | Some replace_amount => 
+    match replace_amount with
+    | SponsorToken zsp zrp zlock =>
+      
+      (* Check how much sponsorship can be replaced *)    
+      is_more_than_enough = uint128_ge husd_amount zsp;
+      replace_sp = match is_more_than_enough with
+      | True => zsp
+      | False => husd_amount
+      end;
+      
+      (* Accept the replace amount from new sponor *)
+      (* Only maximum replace amount can be used *)
+      husd_in = Coins husd replace_sp;
+      Receive husd_in;
+        
+      (* Update zerooaddress sponser *)
+      new_zsp = builtin sub zsp replace_sp;
+      new_zrp = builtin add zrp replace_sp;
+      new_zsponsor = SponsorToken new_zsp new_zrp zlock;
+      sponsors[token][zeroAddress] := new_zsponsor;
+        
+      e = {_eventname : "EVENT_Replace_Sponsor:Some_Sponsor_Amount_Replaced" };
+      event e;
+      (* Add new sponsor *)
+      (* Mint Sponser LP token at this stage *)
+      (* Sponser tokens are same as husd Amounts *)
+      maybe_sponser <- sponsors[token][_sender];
+      match maybe_sponser with
+      | Some sponser => 
+        match sponser with
+        | SponsorToken sp rp lock => 
+          new_sp = builtin add sp replace_sp;
+          new_sponser = SponsorToken new_sp rp lock;
+          sponsors[token][_sender] := new_sponser
+        end
+      | None => 
+        new_sp = replace_sp;
+        rp = zero;
+        lock = None {BNum};
+        new_sponser = SponsorToken new_sp rp lock;
+        sponsors[token][_sender] := new_sponser
+      end
+    end
+  end  
+end
+
+
+
+

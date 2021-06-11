@@ -1,0 +1,88 @@
+Address:
+
+Oracle: 0xef4dd079a0ca5428b58558089de38161a2eefa34
+
+Register: 0x52d4612cdc801a4175f4232e112a2f933d9a0bb6
+HUSD: 0x0d144f867c18ff44338eef3cf39bca1aeb242d14
+HEX: 0x503a1455e5f4d5bcc0b160ef1e036085adf8a054
+
+
+Launcher: 0xb1aa4c66b0bc67a680256cc44e83ac7897846580
+
+KYJToken: 0x7d82619de043e0805f5b0d2e67e72a26e10342ec
+
+
+Address 1: Owner of HASHSWAP (0x8Ab010F65C7E783CA679Fa66d996970dffd58fe3)
+Address 2: Influencer Wallet (0x50A5985f14d42E9a5F8C0f2d76E770098a0b5319)
+Address 3: Sponsor Wallet (0x50A5985f14d42E9a5F8C0f2d76E770098a0b5319)
+
+
+
+RUN/TEST BACKEND:
+
+NOTE: All directly called transition start by CAPITAL letter, all automatically called transitions start from SMALL letters
+
+1. ORACLE: Deploy Oracle: Owner - Address 1
+
+	- Copy ORACLE contract address and hardcode it in REGISTER
+
+	- Copy ORACLE contract address and hardcode it in INFLUENCERToken
+
+	- Call "InsertLink" to add test links (_sender = Owner)
+
+2. REGISTER: Deploy Register: Owner - Address 1
+
+	- Copy REGISTER contract address and hardcode it in LAUNCHER
+
+	- Call "SetRegisterOracle" from Register (_sender = Owner)
+
+	- Call "RegisterLink" to register a new Influencer link (_sender = Any wallet) (Ideally it should be Influencer wallet but main verification is EXCLUSIVELY by the address verified by influencer on Social media link)
+
+	Tip: call this transition using Address 1 to save time of switching to different account while TESTING
+
+3. ORACLE: Call "VerifyLink" to complete link registration from STEP-2. (This depends upon the official MANUAL verification of influencer link by Influencer by adding the wallet address on Social media account)
+
+4. HUSD: Deploy HUSD: Owner - Address 1 (Owner should be same as ORACLE/REGISTER)
+
+	- Copy HUSD contract address and hardcode it in HEX
+
+	- Copy HUSD contract address and hardcode it in LAUNCHER
+
+5. HEX: Deploy HEX: Owner - Address 1 (Owner should be same as ORACLE/REGISTER/HUSD) 
+
+	TIP: HEX is a big contract so change the GAS_LIMIT to 33000 and GAS_PRICE to 2000000000 for deployment
+
+	- Copy HEX contract address and hardcode it in LAUNCHER
+
+6. LAUNCHER: Deploy Launcher Owner - Address 1 (Owner should be same as ORACLE/REGISTER/HUSD/HEX)
+
+	TIP: LAUNCHER is a big contract so change the GAS_LIMIT to 38000 and GAS_PRICE to 2000000000 for deployment
+
+	- Call "SetLauncherAddressState" to fix launcher address in REGISTER and HEX (_sender = Owner)
+
+	- Copy LAUNCHER contract address and hardcode it in INFLUENCERToken
+
+7. REGISTER: Call "RequestToken" to start token creation process for Influencer (_sender = Influencer wallet (Address 2))
+
+8. INFLUENCER_TOKEN: Deploy "HRCToken" (or whatevername) as specified by values provided in STEP-7. (owner: Influencer wallet) (_sender: anyone)
+
+9. ORACLE: Call "VerifyTokenStart" to check influencer token against the parameters specified in STEP-7 (_sender = Owner)
+
+10. REGISTER: Call "LaunchSponsorPool" with Price, Liquidity such that product > 1000000000000000 (_sender = Influencer wallet)
+
+	TIP: If everything works fine, we should have a SponsorPool with state : open 
+
+11. HUSD: Call "Transfer" to transfer some HUSD to a SPONSOR wallet (_sender: Address 1, to: Sponsor wallet)
+
+	- Call "IncreaseAllowance" by sponsor wallet to set allowance to LAUNCHER required for STEP-12 (_sender: Sponsor wallet)
+
+
+12. LAUNCHER: Call "AddSponsor" (_sender: Sponsor wallet) to add some HUSD to a sponsor pool. 
+
+
+
+
+
+
+
+

@@ -1,0 +1,471 @@
+  scilla_version 0
+  (***************************************************)
+  (* call transition GetValue() of another contract *)
+  (* "Callee" and get called back in ValueCallback()*)
+  (***************************************************)
+  import BoolUtils IntUtils
+  library Oracle
+  
+  let zero = Uint128 0
+  let smallzero = Uint32 0
+  let smallone = Uint32 1
+  let true: Bool = True
+  let false: Bool = False
+  
+  (* Wrap single message into singleton list *)
+  let one_msg =
+    fun (msg : Message) =>
+      let nil_msg = Nil {Message} in
+      Cons {Message} msg nil_msg
+      
+  
+  (* Event Codes *)
+  let e_link_found = Uint32 1
+  let e_link_registered  = Uint32 2
+  let e_contract_found = Uint32 3
+  let e_contract_deployed = Uint32 4
+  let e_already_deployed = Uint32 5
+  
+  
+(* Error events *)
+type Error =
+| DefaultError
+| UnauthorizedSender
+| UnauthorizedOwner
+| SenderOwnerMismatch
+| UnauthorizedAddressMismatch
+| UnauthorizedAddressMatch
+| FlagIsTrue
+| LinkInEligible
+| LinkNotInEligible
+| LinkIsRegistered
+| LinkIsNotRegistered
+| TokenIsInitiated
+| TokenIsNotInitiated
+
+let make_error =
+fun (result : Error) =>
+  let result_code = 
+    match result with
+    | DefaultError                      => Int32 0
+    | UnauthorizedSender                => Int32 -1
+    | UnauthorizedOwner                 => Int32 -2
+    | SenderOwnerMismatch               => Int32 -3
+    | UnauthorizedAddressMismatch       => Int32 -40
+    | UnauthorizedAddressMatch          => Int32 -41
+    | FlagIsTrue                        => Int32 -5
+    | LinkInEligible                    => Int32 -60
+    | LinkNotInEligible                 => Int32 -61
+    | LinkIsRegistered                  => Int32 -70
+    | LinkIsNotRegistered               => Int32 -71
+    | TokenIsInitiated                  => Int32 -80
+    | TokenIsNotInitiated               => Int32 -81
+    end
+  in
+  let result_string : String = 
+    match result with
+    | DefaultError                      => "Error Never Called"
+    | UnauthorizedSender                => "unauthorized sender"
+    | UnauthorizedOwner                 => "Unauthorized Owner"
+    | SenderOwnerMismatch               => "Sender Owner Mismatch"
+    | UnauthorizedAddressMismatch       => "Unauthorized Address Mismatch"
+    | UnauthorizedAddressMatch          => "Unauthorized Address Match"
+    | FlagIsTrue                        => "FlagIsTrue"
+    | LinkInEligible                    => "Link is already in eligible map"
+    | LinkNotInEligible                 => "Link is not in eligible map"
+    | LinkIsRegistered                  => "Link is already in registered map"
+    | LinkIsNotRegistered               => "Link is not in registered map"
+    | TokenIsInitiated                  => "Create Token is already initiated"
+    | TokenIsNotInitiated               => "Create Token is not initiated"
+    end
+  in
+  { _exception : result_string; code : result_code }
+    
+
+  let zeroAddress: ByStr20 = 0x0000000000000000000000000000000000000000
+  
+  (* To avoid Option ByStr20 type while matching with ByStr20 *)
+  let get_address =
+    fun (some_address: Option ByStr20) =>
+    match some_address with
+    | Some val => val
+    | None => zeroAddress
+    end
+    
+    
+  type Token = 
+  | Token of String String Uint32 Uint128
+ 
+  
+(***************************************************)
+(*********     CONTRACT DEFINITION       ***********)
+(***************************************************)
+contract Caller( owner : ByStr20 )
+  
+  
+  field eligible_links: Map String String
+                  = Emp String String
+  
+  field registered_links: Map String ByStr20
+                  = Emp String ByStr20
+  
+  field initiated_tokens : Map ByStr20 Token
+                  = Emp ByStr20 Token
+  
+  field register_address : ByStr20 = zeroAddress
+  
+  field register_address_called : Bool = false
+  
+
+(**************************************)
+(*             Procedures             *)
+(**************************************)
+
+
+procedure ThrowError(err : Error)
+  e = make_error err;
+  throw e
+end
+
+procedure FlagIsFalse(flag : Bool)
+  match flag with
+  | True => 
+    err = FlagIsTrue;
+    ThrowError err
+  | False =>
+  end
+end
+
+procedure AddressMatch(yes : Bool, address1 : ByStr20, address2 : ByStr20, err1 : Error, err2 : Error)
+  is_match = builtin eq address1 address2;
+  match is_match with
+  | True =>
+    match yes with
+    | True =>
+    | False =>
+      ThrowError err2
+    end
+  | False =>
+    match yes with
+    | True =>
+      ThrowError err1
+    | False =>
+    end
+  end
+end
+
+procedure MatchSender(address : ByStr20)
+  err1 = UnauthorizedSender;
+  err2 = DefaultError;
+  AddressMatch true address _sender err1 err2
+end
+
+procedure MatchOwner(address : ByStr20)
+  err1 = UnauthorizedOwner;
+  err2 = DefaultError;
+  AddressMatch true owner address err1 err2
+end
+
+procedure OwnerIsSender()
+  err1 = SenderOwnerMismatch;
+  err2 = DefaultError;
+  AddressMatch true owner _sender err1 err2
+end
+
+
+procedure LinkEligible(yes: Bool, link : String)
+  link_exist <- exists eligible_links[link];
+  match link_exist with
+  | True =>
+        match yes with
+        |True =>
+        | False =>
+          err = LinkInEligible;
+          ThrowError err
+        end
+  | False =>
+        match yes with
+        |True =>
+          err = LinkNotInEligible;
+          ThrowError err
+        | False =>
+        end
+  end
+
+end
+
+procedure LinkRegistered(yes: Bool, link : String)
+  link_exist <- exists registered_links[link];
+  match link_exist with
+  | True =>
+        match yes with
+        |True =>
+        | False =>
+          err = LinkIsRegistered;
+          ThrowError err
+        end
+  | False =>
+        match yes with
+        |True =>
+          err = LinkIsNotRegistered;
+          ThrowError err
+        | False =>
+        end
+  end
+
+end
+
+procedure TokenInitiated(yes: Bool, wallet : ByStr20)
+  wallet_exist <- exists initiated_tokens[wallet];
+  match wallet_exist with
+  | True =>
+        match yes with
+        |True =>
+        | False =>
+          err = TokenIsInitiated;
+          ThrowError err
+        end
+  | False =>
+        match yes with
+        |True =>
+          err = TokenIsNotInitiated;
+          ThrowError err
+        | False =>
+        end
+  end
+
+end
+
+
+
+(***************************************)
+(*             Transitions             *)
+(***************************************)
+
+  (* Insert Link into Oracle without restriction *)
+  (* Only owner can insert new links *)
+  (* Only used for Development *)
+  transition InsertLink (link : String, name : String)
+  
+    (* Sender should be same as Owner *)
+    OwnerIsSender;
+    
+      (* If link is already in eligible mao then not insert *)
+      LinkEligible false link;
+      
+        eligible_links[link] := name;
+        e = {_eventname : "new_link_registered"; code : e_link_registered};
+        event e
+        
+  end
+  
+  
+  (* Delete Link from Oracle *)
+  (* Only owner can delete links *)
+  (* Used as transition in Development *)
+  transition DeleteLink (link : String)
+  
+    (* Sender should be same as Owner *)
+    OwnerIsSender;
+    
+      (* If link is in eligible map then delete *)
+      LinkEligible true link;
+      
+        delete eligible_links[link];
+        e = {_eventname : "link_deleted"; code : e_link_found};
+        event e
+      
+  end
+  
+  (* This transition is called ONE time *)
+  (* Only Register can call this transition *)
+  (* Owner of Oracle and Transition Should be SAME *)
+  (* Oracle Address is hardcoded in Register *)
+  transition setRegisterAddress( sender_owner: ByStr20 )
+  
+    (* Owner of Register contract should be same as owner *)
+    MatchOwner sender_owner;
+    
+      (* If register flag is false then set register_address field to sender *)
+      address_flag <- register_address_called;
+      FlagIsFalse address_flag;
+      
+          register_address_called := true;
+          register_address := _sender;
+          e = {_eventname : "register_contract_address_set_forever"; code : e_link_found};
+          event e
+      
+  end
+  
+
+  
+  (* Only Register can call this *)
+  (* Oracle ONLY check for 2 things: Link is Eligible , Link is not verified already *)
+  (* Sends back Msg to REGISTER in either case *)
+  transition validateLink (link : String)
+  
+    (* Sender should be the Register Contract Address *)
+    register <- register_address;
+    MatchSender register;
+    
+      (* link being registered should exist in Eligible link map *)
+      link_exist <- exists eligible_links[link];
+      match link_exist with
+      | True =>
+        
+        (* Link shouldn't be in Registered map already *)
+        LinkRegistered false link;
+        
+        (* Create a record in Registered_link map *)
+        (* Registered_link[LINK] = Wallet *)
+        registered_links[link] := owner;
+        
+        (* Calling the REGISTER with Eligible Link *)
+        msg = {_tag : "startVerifiy"; _recipient : register; _amount : zero; link : link};
+        msgs = one_msg msg;
+        send msgs;
+        
+        e = {_eventname : "link_verification_started"; code : e_link_found};
+        event e
+        
+        
+      | False =>
+        
+        (* Calling the REGISTER with link verification Failed Msg *)
+        msg = {_tag : "failVerify"; _recipient : register; _amount : zero};
+        msgs = one_msg msg;
+        send msgs;
+        
+        e = {_eventname : "link_verification_terminated"; code : e_link_registered};
+        event e
+      end
+    
+  end
+  
+  (* Only OWNER *)
+  (* Manually check influencer link to complete the verification process *)
+  (* If link is in proper validation status i.e link -> owner  *)
+  (* Send a Msg back to REGISTER with the verification string  *)
+  (* Ideally verification string should be Influencer wallet  *)
+  transition VerifyLink(link : String, wallet : ByStr20)
+  
+    (* Sender should be same as Owner *)
+    OwnerIsSender;
+      
+      (* link should be in registered map *)
+      LinkRegistered true link;
+      
+          (* Processing verify string stored in map for comparison *)  
+          s_link_owner <- registered_links[link];
+          saved_link_owner = get_address s_link_owner;
+          
+          (* Search saved string in token map (Pool already activated) *)
+          err1 = UnauthorizedAddressMismatch;
+          err2 = DefaultError;
+          AddressMatch true saved_link_owner owner err1 err2;
+          
+          (* If a link is properly verified then set it to owner in Registered Links *)
+          registered_links[link] := wallet;
+            
+          (* Calling the REGISTER with Verification Complete Msg *)
+          register <- register_address;
+          msg = {_tag : "verifyCompleteLink"; _recipient : register; _amount : zero; link : link; wallet : wallet };
+          msgs = one_msg msg;
+          send msgs;
+          
+          e = {_eventname : "oracle_verification_completed"; code : e_link_registered};
+          event e
+
+  end
+  
+  
+  
+  (* Create Token By Oracle *)
+  (* Only Register can call this *)
+  transition createToken (wallet : ByStr20, name : String, symbol : String, decimals : Uint32, supply : Uint128 )
+  
+    (* Sender should be the Register Contract Address *)
+    register <- register_address;
+    MatchSender register;
+    
+      (* wallet being registered should not already be present in token initiated *)
+      TokenInitiated false wallet;
+      
+        (* Build the Token ADT *)
+        token = Token name symbol decimals supply;
+        
+        (* Create record in the map *)
+        initiated_tokens[wallet] := token
+        
+  end
+  
+  
+  
+  (* This Transition is called by OWNER *)
+  (* OWNER should create the token contract from the initiated_tokens map *)
+  (* OWNER then sends the token contract created and wallet to the REGISTER *)
+  transition VerifyTokenStart(token : ByStr20, wallet : ByStr20)
+  
+    (* Sender should be same as Owner *)
+    OwnerIsSender;
+      
+      (* wallet should be in registered token map *)
+      TokenInitiated true wallet;
+      
+          e = {_eventname : "oracle_verification_started"; code : e_link_registered};
+          event e; 
+          
+          (* Calling the Token to verify details *)
+          register <- register_address;
+          msg = {_tag : "oracleValidation"; _recipient : token; _amount : zero; wallet : wallet};
+          msgs = one_msg msg;
+          send msgs;
+          
+          e = {_eventname : "oracle_verification_completed"; code : e_link_registered};
+          event e
+
+  end
+  
+  (* This Transition is called by Token *)
+  transition verifyTokenComplete( wallet : ByStr20, 
+  name : String, 
+  symbol : String, 
+  decimals : Uint32, 
+  supply : Uint128 )
+  
+    (* wallet should be in registered token map *)
+    maybe_token <- initiated_tokens[wallet];
+    match maybe_token with 
+    | None =>
+    | Some token => 
+      match token with
+      | Token nm sym dec sup =>
+        
+        is_name_same = 
+          let is_name_same = builtin eq nm name in
+          let is_symbol_same = builtin eq sym symbol in
+        andb is_name_same is_symbol_same;  
+        
+        is_supply_same = 
+          let is_decimals_same = builtin eq dec decimals in
+          let is_supply_same = builtin eq sup supply in
+        andb is_decimals_same is_supply_same;  
+        
+        is_token_same = andb is_name_same is_supply_same; 
+        match is_token_same with
+        | False =>
+        | True => 
+          
+          (* Calling the REGISTER with Verification Complete Msg *)
+          register <- register_address;
+          msg = {_tag : "activateToken"; _recipient : register; _amount : zero; wallet : wallet; token : _sender};
+          msgs = one_msg msg;
+          send msgs;
+          
+          e = {_eventname : "oracle_verification_completed"; code : e_link_registered};
+          event e
+        end
+      end
+    end
+  end
+  
