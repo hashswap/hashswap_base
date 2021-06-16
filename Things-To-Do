@@ -38,4 +38,6 @@ Conceptual
 
 1.  Min Liquidity in DEX: How is 1000000000000000 = 1000 zil. Is it a convention ?
 
+Resolved: basically to have decimal value in Zil it is required. Same thing needs to be done with HUSD. So like we call 1 HUSD = 1000000000000 HUSH 
+
 2. Create a WAY to "IncreaseAllowance" before calling "AddLiquidity" or "Addsponsor" by investors!!! 

@@ -1,8 +1,8 @@
 Address:
 
-Oracle: 0xef4dd079a0ca5428b58558089de38161a2eefa34
+Oracle: 0x13cb20d962e40a1bea7e02cbc6d95e605501a583
+Register: 0xf36c5ca7c6f696d15c0bfbcb4d257655c1c45cd4
 
-Register: 0x52d4612cdc801a4175f4232e112a2f933d9a0bb6
 HUSD: 0x0d144f867c18ff44338eef3cf39bca1aeb242d14
 HEX: 0x503a1455e5f4d5bcc0b160ef1e036085adf8a054
 
@@ -56,7 +56,7 @@ NOTE: All directly called transition start by CAPITAL letter, all automatically 
 
 6. LAUNCHER: Deploy Launcher Owner - Address 1 (Owner should be same as ORACLE/REGISTER/HUSD/HEX)
 
-	TIP: LAUNCHER is a big contract so change the GAS_LIMIT to 38000 and GAS_PRICE to 2000000000 for deployment
+	TIP: LAUNCHER is a big contract so change the GAS_LIMIT to 50000 and GAS_PRICE to 2000000000 for deployment
 
 	- Call "SetLauncherAddressState" to fix launcher address in REGISTER and HEX (_sender = Owner)
 

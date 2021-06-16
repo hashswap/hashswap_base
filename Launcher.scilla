@@ -92,8 +92,8 @@ let zeroAddress: ByStr20 = 0x0000000000000000000000000000000000000000
 (* Oracle Contract id is saved as a Immutable Variable *)
 (* Because Oracle is deployed first  and Orcacle address is hardcoded *)
 (* So no one can possibly change it sice it is a immutable variable *)
-let register: ByStr20 = 0xc09e3c596804fd591a440acc83d165fb01235d42
-let hex: ByStr20 = 0x01eae8b68aa35a9fe660aadbacbc2d5e392da018
+let register: ByStr20 = 0xf36c5ca7c6f696d15c0bfbcb4d257655c1c45cd4
+let hex: ByStr20 = 0x61fdb6fc6d53e6df1a3136a441232cf06dab7aed
 
 
 (* To avoid Option ByStr20 type while matching with ByStr20 *)
@@ -132,7 +132,7 @@ type Pool = | Pool of Uint128 Uint128 (* x, y = zil reserve, token reserve *)
 type SponsorPool = | SponsorPool of Uint128 Uint128 Uint128 State (Option BNum)
 (* x, y, p = husd reserve, token reserve, price and deadline in BNum *)
 
-let husd_address = 0xad686d12e5326448f6dffdc11803276683b17d31
+let husd_address = 0x092538858d508332b010fc16e4f07f4e3e27c7a5
 let husd = Token husd_address
 
 
@@ -301,14 +301,14 @@ procedure Send(coins : Coins, to_address : ByStr20)
   end
 end
 
-procedure SendAllowance(coins : Coins, to_address : ByStr20)
+procedure SendAllowance(coins : Coins, spender_address : ByStr20)
   match coins with
   | Coins token amount =>
     match token with
     | Token t =>
       msg_to_token =  {
         _tag : "IncreaseAllowance"; _recipient: t; _amount: zero;
-        to: to_address; amount: amount
+        spender: spender_address; amount: amount
       };
       msgs = oneMsg msg_to_token;
       send msgs
@@ -362,8 +362,14 @@ procedure LaunchPoolOnHEX ( token : ByStr20 )
         token_to_HEX = Coins tokenT y;
         SendAllowance token_to_HEX hex;
         
-        
-        msg = {_tag : "LaunchSponsorPool"; _recipient : hex; _amount : zero; 
+        new_sponsor_pool =
+            let new_state = Launched in
+            let new_deadline = None {BNum} in
+        SponsorPool x y p new_state new_deadline;
+        launchs[token] := new_sponsor_pool;
+          
+          
+        msg = {_tag : "launchSponsorPool"; _recipient : hex; _amount : zero; 
               token_address: token; husd_amount : x; token_amount : y};
         msgs = oneMsg msg;
         send msgs
