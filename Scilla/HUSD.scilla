@@ -6,6 +6,9 @@ scilla_version 0
 import IntUtils
 library FungibleToken
 
+let true: Bool = True
+let false: Bool = False
+  
 let one_msg = 
   fun (msg : Message) => 
   let nil_msg = Nil {Message} in
@@ -47,6 +50,8 @@ let get_val =
   | None => zero
   end
 
+let zeroAddress: ByStr20 = 0x0000000000000000000000000000000000000000
+  
 (***************************************************)
 (*             The contract definition             *)
 (***************************************************)
@@ -70,6 +75,11 @@ field balances: Map ByStr20 Uint128
 
 field allowances: Map ByStr20 (Map ByStr20 Uint128) 
   = Emp ByStr20 (Map ByStr20 Uint128)
+  
+field hex_address : ByStr20 = zeroAddress
+  
+field hex_address_called : Bool = False
+  
 
 (**************************************)
 (*             Procedures             *)
@@ -116,6 +126,48 @@ end
 (***************************************)
 (*             Transitions             *)
 (***************************************)
+(* This transition is called ONE time *)
+(* Only HEX can call this transition *)
+(* Owner of HUSD and HEX Should be SAME *)
+(* HUSD Address is hardcoded in HEX *)
+transition setHEXAddress( sender_owner: ByStr20 )
+  
+  (* Owner of Register contract should be same as owner *)
+  is_sender_owner = builtin eq contract_owner _sender;
+  match is_sender_owner with
+  | False =>
+  | True =>
+    (* If register flag is false then set register_address field to sender *)
+    address_flag <- hex_address_called;
+    match address_flag with
+    | True =>
+    | False =>
+        hex_address_called := true;
+        hex_address := _sender;
+        e = {_eventname : "hex_contract_address_set_forever"};
+        event e
+    end
+  end
+end
+  
+  
+  
+transition GenerateStakingRewardsPool (new_staking_rewards : Uint128)
+
+  hex <- hex_address;
+  is_sender_hex = builtin eq hex _sender;
+  match is_sender_hex with
+  | False =>
+  | True =>
+    (* If register flag is false then set register_address field to sender *)
+    old_hex_bal <- balances[hex];
+    new_hex_bal = match old_hex_bal with
+    | Some old_bal => builtin add old_bal new_staking_rewards
+    | None => new_staking_rewards
+    end;
+    balances[hex] := new_hex_bal
+  end
+end
 
 (* @dev: Increase the allowance of an approved_spender over the caller tokens. Only token_owner allowed to invoke.   *)
 (* param spender:      Address of the designated approved_spender.                                                   *)

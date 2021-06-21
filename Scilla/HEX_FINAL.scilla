@@ -4,17 +4,20 @@ import BoolUtils IntUtils
 
 library HashSwap
 
-
-type Token = | Token of ByStr20 (* token address / hash *)
-type Coins = | Coins of Token Uint128 (* denom, amount *)
+type Denom =
+  | Husd of ByStr20 (* husd address *)
+  | Token of ByStr20 (* token address / hash *)
+type Coins = | Coins of Denom Uint128 (* denom, amount *)
 type Pool = | Pool of Uint128 Uint128 (* x, y = husd reserve, token reserve *)
+type StakingReward = | StakingReward of Uint128 BNum (* Stakig Reward, Last Staking Reward Block *)
+type Reward = | Reward of Uint128 StakingReward BNum (* Transaction Fee, Staking Reward, Pool Creation Block *)
 
-type Spool = | Spool of Uint128 Uint128 Uint128 (* x, y, p = husd reserve, token reserve, price*)
 let price_denom = Uint256 100 (* fee denominated in basis points (1 b.p. = 0.01%) *)
 
 type SwapDirection = | HusdToToken | TokenToHusd
 type ExactSide = | ExactInput | ExactOutput
-type Swap = | Swap of (Option Pool) SwapDirection ExactSide Uint128 (Option Uint128) Uint256 (* exact amt, limit amt, after fee amt *)
+type Swap = | Swap of (Option Pool) SwapDirection ExactSide Uint128 (Option Uint128) Uint256 
+(* exact amt, limit amt, after fee amt *)
 type ResultOrError =
  | Result of Pool Uint128 (* unwrapped pool, calculated amount *)
  | Error of String
@@ -23,15 +26,12 @@ let zero = Uint128 0
 let one = Uint128 1
 let true: Bool = True
 let false: Bool = False
-
+let zeroAddress: ByStr20 = 0x0000000000000000000000000000000000000000
 
 let min_liquidity = Uint128 1000000000000000 (* 1000 HUSD *)
 let fee_denom = Uint256 10000 (* fee denominated in basis points (1 b.p. = 0.01%) *)
-let husd_address = 0xad686d12e5326448f6dffdc11803276683b17d31
-let husd = Token husd_address
-
-let zeroAddress: ByStr20 = 0x0000000000000000000000000000000000000000
-
+let husd_address = 0x092538858d508332b010fc16e4f07f4e3e27c7a5
+let husd = Husd husd_address
 
 let oneMsg : Message -> List Message =
   fun (msg : Message) =>
@@ -46,6 +46,16 @@ let grow : Uint128 -> Uint256 =
     | None => Uint256 0 (* should never happen *)
     end
 
+
+let ratio : Uint128 -> Uint128 -> Option Uint128 = 
+  fun (n : Uint128) =>
+  fun (d : Uint128) =>
+    let big_n = grow n in
+    let big_d = grow d in 
+    let n_over_d = builtin div big_n big_d in
+    builtin to_uint128 n_over_d
+  
+  
 (* computes the amount of the fraction x / d that is in y *)
 (* result = yd/x *)
 let frac : Uint128 -> Uint128 -> Uint128 -> Option Uint128  =
@@ -59,75 +69,148 @@ let frac : Uint128 -> Uint128 -> Uint128 -> Option Uint128  =
     let d_times_y_over_x = builtin div d_times_y big_x in
     builtin to_uint128 d_times_y_over_x
 
-(* computes the output that should be taken from the output reserve
-    when the given input amount is added to the input reserve *)
-(* xy = (x+i')(y-d) 
-   => d = i'y/(x+i')
-   => d = ik*y/(x*10000 + ik)
+let frac256 : Uint128 -> Uint256 -> Uint256 -> Option Uint128  =
+  fun (a : Uint128) =>
+  fun (d : Uint256) =>
+  fun (k : Uint256) =>
+    let big_a = grow a in
+    let a_times_k = builtin mul big_a k in
+    let a_times_k_over_d = builtin div a_times_k d in
+    builtin to_uint128 a_times_k_over_d
+
+
+(* computes the husd that should be taken from the husd reserve
+    when the given token amount is added to the token reserve *)
+(* i = Husd Amount Output
+   i' = i*10000/k Before Fee Husd Output
+   xy = (x-i')(y+d) 
+   => i' = xd/(y+d) Before Fee Husd
+   => i = i'k/10000  Exact Husd
+   => i = xdk/10000*(y+d)
    k is after_fee = 9997 types
    10000 is fee denom
    i = after fee input amount *) 
-let outputFor : Uint128 -> Uint128 -> Uint128 -> Uint256 -> Option Uint128 =
-  fun (input_amount_u128 : Uint128) =>
-  fun (input_reserve_u128 : Uint128) =>
-  fun (output_reserve_u128 : Uint128) =>
+let outputHusdForExactInputToken : Uint128 -> Uint128 -> Uint128 -> Uint256 -> Option Uint128 =
+  fun (token_amount_u128 : Uint128) =>
+  fun (token_reserve_u128 : Uint128) =>
+  fun (husd_reserve_u128 : Uint128) =>
   fun (after_fee : Uint256) =>
-    let input_amount = grow input_amount_u128 in
-    let input_reserve = grow input_reserve_u128 in
-    let output_reserve = grow output_reserve_u128 in
-    let input_amount_after_fee = builtin mul input_amount after_fee in
-    let numerator = builtin mul input_amount_after_fee output_reserve in
-    let denominator =
-      let d1 = builtin mul input_reserve fee_denom in
-      builtin add d1 input_amount_after_fee in
+    let token_amount = grow token_amount_u128 in
+    let token_reserve = grow token_reserve_u128 in
+    let husd_reserve = grow husd_reserve_u128 in
+    let token_amount_after_fee = builtin mul token_amount after_fee in (* dk *)
+    let numerator = builtin mul husd_reserve token_amount_after_fee in (* xdk *)
+    let denominator = 
+      let d1 = builtin add token_reserve token_amount in (* y+d *)
+      builtin mul d1 fee_denom in (* 10000*(y+d) *)
     let result = builtin div numerator denominator in
     builtin to_uint128 result
 
-(* computes the input that should be given to the input reserve
-   when the given output amount is removed from the output reserve *)
-(* xy = (x+i')(y-d) 
-   => i' = dx/(y-d)
-   i' = ki/10000 = after fee input amount 
-   => i = 10000*dx/k(y-d)
+(* computes the token that should be added to token reserve
+when given amount of husd should be taken from Husd reserve *)
+(* i = Husd Amount Output
+   i' = i*10000/k Before Fee Husd Output
+   xy = (x-i')(y+d) 
+   => d = i'y/(x-i')
+   => d = yi*10000/(xk-i*10000)
+   i = husd_amount to be taken out *) 
+let inputTokenForExactOutputHusd : Uint128 -> Uint128 -> Uint128 -> Uint256 -> Option Uint128 =
+  fun (husd_amount_u128 : Uint128) =>
+  fun (token_reserve_u128 : Uint128) =>
+  fun (husd_reserve_u128 : Uint128) =>
+  fun (after_fee : Uint256) =>
+    let husd_amount = grow husd_amount_u128 in
+    let token_reserve = grow token_reserve_u128 in
+    let husd_reserve = grow husd_reserve_u128 in
+    let husd_amount_before_fee = builtin mul husd_amount fee_denom in (* i*10000 *)
+    let numerator = builtin mul token_reserve husd_amount_before_fee in (* yi*10000 *)
+    let denominator = 
+      let d1 = builtin add husd_reserve after_fee in (* xk *)
+      builtin sub d1 husd_amount_before_fee in (* xk - i*10000 *)
+    let result = builtin div numerator denominator in
+    builtin to_uint128 result
+
+
+(* computes the husd that should be taken from the husd reserve
+    when the given token amount is added to the token reserve *)
+(* i = Husd Amount Input
+   i' = ik/10000 After fee Husd Input
+   xy = (x+i')(y-d) 
+   => d = i'y/(x+i')
+   => d = iky/(x*10000+ik)
    k is after_fee = 9997 types
    10000 is fee denom
-   i = after fee input amount *)
-let inputFor : Uint128 -> Uint128 -> Uint128 -> Uint256 -> Option Uint128 =
-  fun (output_amount_u128 : Uint128) =>
-  fun (input_reserve_u128 : Uint128) =>
-  fun (output_reserve_u128 : Uint128) =>
+   i = after fee input amount *) 
+let outputTokenForExactInputHusd : Uint128 -> Uint128 -> Uint128 -> Uint256 -> Option Uint128 =
+  fun (husd_amount_u128 : Uint128) =>
+  fun (token_reserve_u128 : Uint128) =>
+  fun (husd_reserve_u128 : Uint128) =>
   fun (after_fee : Uint256) =>
-    let output_amount = grow output_amount_u128 in
-    let input_reserve = grow input_reserve_u128 in
-    let output_reserve = grow output_reserve_u128 in
-    let numerator =
-      let n1 = builtin mul input_reserve output_amount in
-      builtin mul n1 fee_denom in
-    let denominator =
-      let d1 = builtin sub output_reserve output_amount in
+    let husd_amount = grow husd_amount_u128 in
+    let token_reserve = grow token_reserve_u128 in
+    let husd_reserve = grow husd_reserve_u128 in
+    let husd_amount_after_fee = builtin mul husd_amount after_fee in (* ik *)
+    let numerator = builtin mul token_reserve husd_amount_after_fee in (* iky *)
+    let denominator = 
+      let d1 = builtin mul husd_reserve fee_denom in (* x*100000 *)
+      builtin add d1 husd_amount_after_fee in (* x*10000 + ik *)
+    let result = builtin div numerator denominator in
+    builtin to_uint128 result
+
+
+(* computes the husd that should be taken from the husd reserve
+    when the given token amount is added to the token reserve *)
+(* i = Husd Amount Input
+   i' = ik/10000 After fee Husd Input
+   xy = (x+i')(y-d) 
+   => i' = xd/(y-d)
+   => i = xd*10000/k(y-d)
+   k is after_fee = 9997 types
+   10000 is fee denom
+   i = after fee input amount *) 
+let inputHusdForExactOutputToken : Uint128 -> Uint128 -> Uint128 -> Uint256 -> Option Uint128 =
+  fun (token_amount_u128 : Uint128) =>
+  fun (token_reserve_u128 : Uint128) =>
+  fun (husd_reserve_u128 : Uint128) =>
+  fun (after_fee : Uint256) =>
+    let token_amount = grow token_amount_u128 in
+    let token_reserve = grow token_reserve_u128 in
+    let husd_reserve = grow husd_reserve_u128 in
+    let token_amount_before_fee = builtin mul token_amount fee_denom in (* d*10000 *)
+    let numerator = builtin mul husd_reserve token_amount_before_fee in
+    let denominator = (* k(y-d) *)
+      let d1 = builtin sub token_reserve token_amount in
       builtin mul d1 after_fee in
     let result = builtin div numerator denominator in
     builtin to_uint128 result
+
 
 (* computes the corresponding input or output amount for
    the given exact output or input amount, pool, and direction *)
 let amountFor : Pool -> SwapDirection -> ExactSide -> Uint128 -> Uint256 -> Option Uint128 =
   fun (pool : Pool) =>
-  fun (direction : SwapDirection) =>
+  fun (swap_direction : SwapDirection) =>
   fun (exact_side : ExactSide) =>
   fun (exact_amount : Uint128) =>
   fun (after_fee : Uint256) =>
     match pool with
     | Pool husd_reserve token_reserve =>
-      let calc = fun (exact: ExactSide) =>
-        match exact with
-        | ExactInput => outputFor
-        | ExactOutput => inputFor
-        end in
-      match direction with
-      | HusdToToken => calc exact_side exact_amount husd_reserve token_reserve after_fee
-      | TokenToHusd => calc exact_side exact_amount token_reserve husd_reserve after_fee
-      end
+      let calc = 
+      fun (swap : SwapDirection) =>
+      fun (exact: ExactSide) =>
+      match exact with
+      | ExactInput => 
+        match swap with
+        | HusdToToken => outputTokenForExactInputHusd
+        | TokenToHusd => outputHusdForExactInputToken
+        end
+      | ExactOutput => 
+        match swap with
+        | HusdToToken => inputHusdForExactOutputToken
+        | TokenToHusd => inputTokenForExactOutputHusd
+        end
+      end in
+      calc swap_direction exact_side exact_amount token_reserve husd_reserve after_fee
     end
 
 (* checks whether the result amount is within the user provided
@@ -194,21 +277,23 @@ let poolEmpty : Pool -> Bool =
 contract HashSwap
 (
   initial_owner : ByStr20,
-  initial_fee : Uint256
+  initial_fee : Uint256,
+  inflation_rate : Uint256
 )
 
 with
   uint256_le initial_fee fee_denom
 =>
 
-field spools : Map ByStr20 Spool = Emp ByStr20 Spool
 field pools : Map ByStr20 Pool = Emp ByStr20 Pool
 field balances : Map ByStr20 (Map ByStr20 Uint128) = Emp ByStr20 (Map ByStr20 Uint128)
 field total_contributions : Map ByStr20 Uint128 = Emp ByStr20 Uint128
+field total_fees : Map ByStr20 Reward = Emp ByStr20 Reward
+field total_rewards : Map ByStr20 Reward = Emp ByStr20 Reward
 field output_after_fee : Uint256 = builtin sub fee_denom initial_fee
 field owner : ByStr20 = initial_owner
 field pending_owner : ByStr20 = zeroAddress
-
+field staking_rate : Uint256 = inflation_rate
 
 (* Fix LAUNCHER address in HEX *)
 field launcher_address : ByStr20 = zeroAddress
@@ -260,11 +345,17 @@ end
 
 procedure Send(coins : Coins, to_address : ByStr20)
   match coins with
-  | Coins token amount =>
-    match token with
-    | Token t =>
+  | Coins denom amount =>
+    match denom with
+    | Husd husd =>
+      msg_to_husd = { 
+        _tag : "Transfer"; _recipient: husd; _amount: zero;
+        to: to_address; amount: amount };
+      msgs = oneMsg msg_to_husd;
+      send msgs
+    | Token token =>
       msg_to_token =  {
-        _tag : "Transfer"; _recipient: t; _amount: zero;
+        _tag : "Transfer"; _recipient: token; _amount: zero;
         to: to_address; amount: amount
       };
       msgs = oneMsg msg_to_token;
@@ -275,11 +366,18 @@ end
 
 procedure Receive(coins : Coins)
   match coins with
-  | Coins token amount =>
-    match token with
-    | Token t =>
-    msg_to_token = {
-        _tag : "TransferFrom"; _recipient: t; _amount: zero;
+  | Coins denom amount =>
+    match denom with
+    | Husd husd =>
+      msg_to_token = {
+        _tag : "TransferFrom"; _recipient: husd; _amount: zero;
+        from: _sender; to: _this_address; amount: amount
+      };
+      msgs = oneMsg msg_to_token;
+      send msgs
+    | Token token =>
+      msg_to_token = {
+        _tag : "TransferFrom"; _recipient: token; _amount: zero;
         from: _sender; to: _this_address; amount: amount
       };
       msgs = oneMsg msg_to_token;
@@ -296,19 +394,69 @@ procedure DoSwap(
   input_from : ByStr20,
   output_to : ByStr20
 )
+
+  after_fee <- output_after_fee;
   match pool with
   | Pool x y => (* husd reserve, token reserve *)
 
-    (* update new pool balances *)
-    match input with
-    | Coins input_token input_amount =>
-      match output with
-      | Coins output_token output_amount =>
-         new_pool =
-            let new_x = builtin sub x output_amount in
-            let new_y = builtin add y input_amount in
-          Pool new_x new_y;
-          pools[token_address] := new_pool
+    maybe_pool_reward <- total_rewards[token_address];
+    match maybe_pool_reward with
+    | None =>
+    | Some pool_reward =>
+      match pool_reward with
+      | Reward transaction_fee sr pc =>
+    
+    
+      (* update new pool balances *)
+        match input with
+        | Coins input_denom input_amount =>
+          match output with
+          | Coins output_denom output_amount =>
+            match input_denom with
+            | Husd husd =>
+            
+            (* Actual Input HUSD that goes in the pool is less than Input HUSD *)
+            (* Rest of the HUSD goes in HEX as transaction fee *)
+              some_actual_input = frac256 input_amount fee_denom after_fee;
+              match some_actual_input with
+              | None =>
+              | Some actual_input => 
+                new_pool =
+                let new_x = builtin add x actual_input in
+                let new_y = builtin sub y output_amount in
+                Pool new_x new_y;
+                pools[token_address] := new_pool;
+              
+                (* TRansaction fee difference between input_amount actual_input *)
+                new_pool_reward = 
+                  let new_transaction_fee = builtin sub input_amount actual_input in
+                Reward new_transaction_fee sr pc;
+                total_rewards[token_address] :=  new_pool_reward
+                
+              end
+            | Token t =>
+          
+              (* Actual Output HUSD from the pool is more than Output amount HUSD *)
+              (* Rest of the HUSD stay with HEX as transaction fee *)
+              some_actual_output = frac256 output_amount after_fee fee_denom;
+              match some_actual_output with
+              | None =>
+              | Some actual_output => 
+                new_pool =
+                  let new_x = builtin sub x actual_output in
+                  let new_y = builtin add y input_amount in
+                Pool new_x new_y;
+                pools[token_address] := new_pool;
+              
+                (* TRansaction fee difference between actual_output output_amount *)
+                new_pool_reward = 
+                  let new_transaction_fee = builtin sub actual_output output_amount in
+                Reward new_transaction_fee sr pc;
+                total_rewards[token_address] :=  new_pool_reward
+              end
+            end 
+          end
+        end
       end
     end;
 
@@ -425,10 +573,6 @@ end
 
 
 
-
-
-
-
 (* This transition is called ONE time *)
 (* Only Launcher can call this transition *)
 (* Owner of Launcher and HEX Should be SAME *)
@@ -450,10 +594,6 @@ transition setLauncherAddress( sender_owner: ByStr20 )
     event e
   end  
 end
-
-
-
-
 
 transition RecipientAcceptTransferFrom(
   initiator : ByStr20,
@@ -574,7 +714,7 @@ transition launchSponsorPool(
   end
 end
 
-(* ZILSWAP: Add Liquidity either add liquidity or create a new pool *)
+(* HUSDSWAP: Add Liquidity either add liquidity or create a new pool *)
 (* HASHSWAP: Add Liquidity only add liquidity to a pool *)
 (* Adding a pool is done only by LAUNCHER *)
 transition AddLiquidity(
@@ -590,6 +730,10 @@ transition AddLiquidity(
   ThrowIfZero max_token_amount;
 
   token = Token token_address;
+
+  (* accept all husd *)
+  husds_in = Coins husd husd_amount;
+  Receive husds_in;
 
   maybe_pool <- pools[token_address];
   match maybe_pool with
@@ -663,6 +807,135 @@ transition AddLiquidity(
     end
   end
 end
+
+
+(* This procedure calculates and pay the total share of fee and staking rewards
+earned by a investor with share ratio and time ratio *)
+procedure InvestorFeeRewards(
+ token_address : ByStr20,
+ shares : Uint128,
+ total_shares : Uint128,
+ option_entry_block : Option BNum,
+ investor_address : ByStr20
+)
+
+  maybe_total_contribution <- total_contributions[token_address];
+  match maybe_total_contribution with
+  | None =>
+  | Some total_contribution =>
+    
+    maybe_pool_rewards <- total_rewards[token_address];
+    match maybe_pool_rewards with
+    | None =>
+    | Some pool_rewards =>
+      match pool_rewards with
+      | Reward transaction_fee staking_reward pool_block =>
+        option_share_ratio = ratio shares total_shares;
+        match option_share_ratio with
+        | None => 
+        | Some share_ratio =>
+        
+          current_block <- & BLOCKNUMBER;
+          total_ratio = match option_entry_block with
+          | None => share_ratio
+          | Some entry_block =>
+            let c_block = current_block in
+            let time_ratio_num = builtin bsub current_block entry_block in
+            let time_ratio_den = builtin bsub current_block pool_block in
+            let time_ratio_i256 = builtin div time_ratio_num time_ratio_den in 
+            let option_time_ratio_u128 = builtin to_uint128 time_ratio_i256 in
+            match option_time_ratio_u128 with
+            | None => zero
+            | Some time_ratio_u128 =>
+              builtin mul share_ratio time_ratio_u128
+            end 
+          end;
+        
+          (* GENERATE STAKING REWARDS EARNED SINCE LAST LIQUIDUTY EVENT *)
+          (* Staking Reward are generated just before a redemption of investor token 
+          This is the most efficient (Minimum transactions) way of 
+          of disseminating staking rewards to pool liquidity as liquidity level changes after every redemttoin*)
+          match staking_reward with
+          | StakingReward staking_fee last_block =>
+            time_since_last_liquidity_event_int256 = builtin bsub current_block last_block;
+            maybe_time_since_last_liquidity_event = builtin to_uint128 time_since_last_liquidity_event_int256;
+            match maybe_time_since_last_liquidity_event with
+            | None =>
+            | Some time_since_last_liquidity_event => 
+              reward_rate <- staking_rate;
+              maybe_curr_staking_fee_per_token = frac256 time_since_last_liquidity_event fee_denom reward_rate;
+              match maybe_curr_staking_fee_per_token with
+              | None =>
+              | Some curr_staking_fee_per_token =>
+              
+                current_staking_fee = builtin mul curr_staking_fee_per_token total_contribution; 
+                new_staking_reward = 
+                  let new_staking_fee = builtin add staking_fee current_staking_fee in
+                  let new_last_block = current_block in
+                StakingReward new_staking_fee new_last_block;
+          
+                new_pool_rewards = Reward transaction_fee new_staking_reward pool_block;
+                total_rewards[token_address] := new_pool_rewards;
+            
+                (* Ask HUSD to generate new staking fee for the pool *)
+                generate_staking_rewards_msg = {_tag : "RemoveSponsorLiquidity"; 
+                  _recipient : husd_address; _amount : zero; 
+                  new_staking_rewards : current_staking_fee};
+                msgs = oneMsg generate_staking_rewards_msg;
+                send msgs
+              end
+            end
+          end;
+        
+          (* Pay the transaction fee and staking reward *)
+          maybe_new_pool_rewards <- total_rewards[token_address];
+          match maybe_new_pool_rewards with      
+          | None =>
+          | Some new_pool_rewards =>
+            match new_pool_rewards with
+            | Reward new_transaction_fee new_staking_reward new_pool_block =>
+              match new_staking_reward with
+              | StakingReward new_staking_fee last_block =>
+                (* Calculate Fee Reward *)
+                investor_tf =  builtin mul total_ratio transaction_fee;
+                investor_sf =  builtin mul total_ratio new_staking_fee;
+                investor_total_fee = builtin add investor_tf investor_sf;
+    
+                (* Send money to investor *)
+                investor_total_rewards = Coins husd investor_total_fee;
+                Send investor_total_rewards investor_address
+              end
+            end
+          end
+          
+          
+        end
+      end
+    end
+  end
+end
+
+(* To pay all fee and rewards for sponsors*)
+(* This transition can only be called by Launcher *)
+transition RedeemSponsorFeeRewards(
+  token_address : ByStr20,
+  sponsor_token : Uint128,
+  total_sponsorship : Uint128,
+  option_entry_block : Option BNum
+)
+
+  launcher <- launcher_address;
+  launcherIsSender = builtin eq launcher _sender;
+  match launcherIsSender with
+  | False =>
+  | True =>
+    (* Calculate and Pay Fee and Rewards *)
+    InvestorFeeRewards token_address sponsor_token total_sponsorship option_entry_block launcher
+  end
+end
+
+
+
 
 
 transition RemoveSponsorLiquidity(
@@ -746,6 +1019,7 @@ transition RemoveSponsorLiquidity(
   end
 end
 
+
 transition RemoveLiquidity(
   token_address : ByStr20,
   contribution_amount : Uint128,
@@ -822,10 +1096,17 @@ transition RemoveLiquidity(
                   total_contributions[token_address] := new_total_contribution
                 end;
 
-                husd_out = Coins husd husd_amount;
+                (* Pay back the principal amount *)
+                husds_out = Coins husd husd_amount;
                 tokens_out = Coins token token_amount;
-                Send husd_out _sender;
+                Send husds_out _sender;
                 Send tokens_out _sender;
+              
+                (* Pay the Fee and Rewards *)
+                (* No concept of time ratio for liquidity providers 
+                as all liquidity providers are unique *)
+                option_entry_block = None {BNum};
+                InvestorFeeRewards token_address contribution_amount total_contribution option_entry_block _sender;
 
                 e = { _eventname: "Burnt"; pool: token_address; address: _sender; amount: contribution_amount };
                 event e
@@ -840,8 +1121,7 @@ end
 
 transition SwapExactHUSDForTokens(
   token_address : ByStr20,
-  (* husd_amount: the husd amount to be sent in *)
-  husd_amount : Uint128,
+  husd_amount: Uint128,
   min_token_amount : Uint128,
   deadline_block : BNum,
   recipient_address : ByStr20
@@ -885,8 +1165,7 @@ end
 
 transition SwapHUSDForExactTokens(
   token_address : ByStr20,
-  (* husd_amount: the max husd amount to be sent in *)
-  husd_amount : Uint128,
+  max_husd_amount: Uint128,
   token_amount : Uint128,
   deadline_block : BNum,
   recipient_address : ByStr20
@@ -894,7 +1173,7 @@ transition SwapHUSDForExactTokens(
   direction = HusdToToken;
   exact_side = ExactOutput;
   exact_amount = token_amount;
-  limit_amount = husd_amount;
+  limit_amount = max_husd_amount;
 
   SwapUsingHUSD
     token_address

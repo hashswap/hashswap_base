@@ -121,10 +121,12 @@ type Liquidate =
   | Full
   | Partial of Uint128
   
-type SponsorToken = | SponsorToken of Uint128 Uint128 (Option BNum)
-(* sp rp lock: sp is the sponsor husd in the pool *)
-(* sp rp lock: rp is the removal reuest for sponsor husd from the pool *)
-(* sp rp lock: loack is the sponsor lockin period to remove husd from the pool *)
+type SponsorToken = | SponsorToken of Uint128 Uint128 Uint128 (Option BNum) (Option BNum)
+(* sp rp tp fb lock: sp is the sponsor husd in the pool *)
+(* sp rp tp fb lock: rp is the removal request for sponsor husd from the pool *)
+(* sp rp tp fb lock: tp is the transaction fee earned by sponsor *)
+(* sp rp tp fb lock: fb is the entry block when sponsor came *)
+(* sp rp tp fb lock: lock is the sponsor lockin period to remove husd from the pool *)
 
 type Token = | Token of ByStr20 (* token address / hash *)
 type Coins = | Coins of Token Uint128 (* denom, amount *)
@@ -666,16 +668,18 @@ transition AddSponser (
         match maybe_sponser with
         | Some sponser => 
           match sponser with
-          | SponsorToken sp rp lock => 
+          | SponsorToken sp rp tp fb lock => 
             new_sp = builtin add sp husd_amount;
-            new_sponser = SponsorToken new_sp rp lock;
+            new_sponser = SponsorToken new_sp rp tp fb lock;
             sponsors[token][_sender] := new_sponser
           end
         | None => 
           new_sp = husd_amount;
           new_rp = zero;
+          new_tp = zero;
+          new_fb = None {BNum}; (* First block is set to zero for initial sponsors to avoid unneccessary calculations *)
           new_lock = None {BNum};
-          new_sponser = SponsorToken new_sp new_rp new_lock;
+          new_sponser = SponsorToken new_sp new_rp new_tp new_fb new_lock;
           sponsors[token][_sender] := new_sponser
         end;
           
@@ -836,7 +840,7 @@ transition RemoveSponser (
       throw e
     | Some sponsor =>
       match sponsor with
-      | SponsorToken sp rp option_lock =>
+      | SponsorToken sp rp tp fb option_lock =>
   
         (* Check if the launch pool exists *)
         maybe_pool <- launchs[token];
@@ -874,7 +878,7 @@ transition RemoveSponser (
               | False =>
                 (* Sponser token update *)
                 new_sp = builtin sub sp sponser_tokens;
-                new_sponsor = SponsorToken new_sp rp option_lock;
+                new_sponsor = SponsorToken new_sp rp tp fb option_lock;
                 sponsors[token][_sender] := new_sponsor;
                 
                 (* Reduce the amount in total_sponsorship *)
@@ -913,9 +917,18 @@ transition RemoveSponser (
                   and first amount is removed *)
                   new_sp = builtin sub sp sponser_tokens;
                   new_rp = builtin add rp sponser_tokens; (* Ideally rp should be zero here before adding *)
+                
+                  (* This message tells HEX to redeem transaction fee and staking rewards earned by sponsor *)
+                  redeem_sponsor_fee_msg = {_tag : "RedeemSponsorFeeRewards"; 
+                    _recipient : hex; _amount : zero; 
+                    token : token; sponsor_tokens : sponser_tokens; 
+                    total_sponsorship : ts; entry_block : fb };
+                  msg = oneMsg redeem_sponsor_fee_msg;
+                  send msg;
+                  
                   new_lock = builtin badd current_block sponsor_Lockin;
                   option_new_lock = Some {BNum} new_lock;
-                  new_sponsor = SponsorToken new_sp new_rp option_new_lock;
+                  new_sponsor = SponsorToken new_sp new_rp tp fb option_new_lock;
                   sponsors[token][_sender] := new_sponsor;
                   
                   (* Update zeroaddress sp *)
@@ -926,14 +939,16 @@ transition RemoveSponser (
                   | None => 
                     zsp = sponser_tokens;
                     zrp = zero;
+                    ztp = zero;
+                    zfb = None {BNum};
                     zlock = None {BNum};
-                    zsponsor = SponsorToken zsp zrp zlock;
+                    zsponsor = SponsorToken zsp zrp ztp zfb zlock;
                     sponsors[token][zeroAddress] := zsponsor
                   | Some zero_sponsor =>
                     match zero_sponsor with
-                    | SponsorToken zsp zrp zlock =>
+                    | SponsorToken zsp zrp ztp zfb zlock =>
                       new_zsp = builtin add sponser_tokens zsp;
-                      new_zero_sponsor = SponsorToken new_zsp zrp zlock;
+                      new_zero_sponsor = SponsorToken new_zsp zrp ztp zfb zlock;
                       sponsors[token][zeroAddress] := new_zero_sponsor
                     end
                   end;
@@ -965,9 +980,14 @@ transition RemoveSponser (
                     (* All of rp is removed irrespective of what sponsor asked *)
                     (* For simplification *)
                     option_new_lock = None {BNum};
-                    new_sponsor = SponsorToken sp zero option_new_lock;
+                    new_sponsor = SponsorToken sp zero zero fb option_new_lock;
                     sponsors[token][_sender] := new_sponsor;
-                         
+                      
+                    (* Pay the sponser back fee and rewards firstup 
+                    because this amount is already been given by HEX *)
+                    fee_reward_husd_out = Coins husd tp;
+                    Send fee_reward_husd_out _sender;
+                          
                     (* Now we have to pay the sposnsor back *) 
                     (* This is the most tricky part *)
                     (* If the sposnsor has been replaced already then its easy to pay him back *)
@@ -981,14 +1001,14 @@ transition RemoveSponser (
                       throw e
                     | Some zero_sponsor =>
                       match zero_sponsor with
-                      | SponsorToken zsp zrp zlock =>
+                      | SponsorToken zsp zrp ztp zfb zlock =>
                         
                         is_unsafe_removal = uint128_ge rp zrp;
                         match is_unsafe_removal with
                         | False =>
                           
                           new_zrp = builtin sub zrp rp;
-                          new_zsponsor = SponsorToken zsp new_zrp zlock;
+                          new_zsponsor = SponsorToken zsp new_zrp ztp zfb zlock;
                           sponsors[token][zeroAddress] := new_zsponsor;
                           
                           (* Pay the sponser back rp tokens *)
@@ -1003,7 +1023,7 @@ transition RemoveSponser (
                           diffsp = builtin sub rp zrp;
                           new_zsp = builtin sub zsp diffsp;  
                           new_zrp = zero;
-                          new_zsponsor = SponsorToken new_zsp new_zrp zlock;
+                          new_zsponsor = SponsorToken new_zsp new_zrp ztp zfb zlock;
                           sponsors[token][zeroAddress] := new_zsponsor;
                           
                           new_ts = builtin sub ts diffsp;
@@ -1082,7 +1102,7 @@ transition ReplaceSponsor (
     (* No sposnsor to replace *)
   | Some replace_amount => 
     match replace_amount with
-    | SponsorToken zsp zrp zlock =>
+    | SponsorToken zsp zrp ztp zfb zlock =>
       
       (* Check how much sponsorship can be replaced *)    
       is_more_than_enough = uint128_ge husd_amount zsp;
@@ -1099,7 +1119,7 @@ transition ReplaceSponsor (
       (* Update zerooaddress sponser *)
       new_zsp = builtin sub zsp replace_sp;
       new_zrp = builtin add zrp replace_sp;
-      new_zsponsor = SponsorToken new_zsp new_zrp zlock;
+      new_zsponsor = SponsorToken new_zsp new_zrp ztp zfb zlock;
       sponsors[token][zeroAddress] := new_zsponsor;
         
       e = {_eventname : "EVENT_Replace_Sponsor:Some_Sponsor_Amount_Replaced" };
@@ -1111,16 +1131,19 @@ transition ReplaceSponsor (
       match maybe_sponser with
       | Some sponser => 
         match sponser with
-        | SponsorToken sp rp lock => 
+        | SponsorToken sp rp tp fb lock => 
           new_sp = builtin add sp replace_sp;
-          new_sponser = SponsorToken new_sp rp lock;
+          new_sponser = SponsorToken new_sp rp tp fb lock;
           sponsors[token][_sender] := new_sponser
         end
       | None => 
         new_sp = replace_sp;
         rp = zero;
+        tp = zero;
+        current_block <- & BLOCKNUMBER;
+        fb = Some {BNum} current_block;
         lock = None {BNum};
-        new_sponser = SponsorToken new_sp rp lock;
+        new_sponser = SponsorToken new_sp rp tp fb lock;
         sponsors[token][_sender] := new_sponser
       end
     end
